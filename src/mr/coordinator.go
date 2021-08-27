@@ -14,9 +14,11 @@ type Coordinator struct {
 	files            []string
 	isRead           map[string]bool
 	nReduce          int
-	workId           int
+	mapWorkId        int
 	intermediateFile []string
 	mapFinishNum     int
+	reduceWorkId     int
+	reduceFinishNum  int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -27,13 +29,13 @@ type Coordinator struct {
 // the RPC argument and reply types are defined in rpc.go.
 //
 func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
-	if reply.workId == -1 {
-		reply.workId = c.workId
-		c.workId++
-	}
 
 	for k, v := range c.isRead {
 		if !v {
+			if reply.workId == -1 {
+				reply.workId = c.workId
+				c.workId++
+			}
 			c.isRead[k] = true
 			reply.fileName = k
 			return nil

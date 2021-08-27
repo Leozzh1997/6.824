@@ -36,10 +36,12 @@ type MapReply struct {
 }
 
 type ReduceArgs struct {
+	fileName string
 }
 
 type ReduceReply struct {
-	fileName string
+	fileName []string
+	workId   int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

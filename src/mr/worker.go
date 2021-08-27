@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"time"
 )
 
 //
@@ -18,9 +19,10 @@ type KeyValue struct {
 }
 
 type Work struct {
-	mapFile    string
-	reduceFile []string
-	workId     int
+	mapFile      string
+	reduceFile   []string
+	mapWorkId    int
+	reduceWorkId int
 }
 
 //
@@ -39,9 +41,9 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Fist step Call MapTask and
+	//step1 Call MapTask and
 	//inform coordinator intermediateFile
-	work := Work{workId: -1}
+	work := Work{mapWorkId: -1, reduceWorkId: -1}
 	intermediate := []KeyValue{}
 	for {
 		mapRet := CallMap(&work)
@@ -60,14 +62,20 @@ func Worker(mapf func(string, string) []KeyValue,
 		kva := mapf(work.mapFile, string(content))
 		intermediate = append(intermediate, kva...)
 	}
-	oname := "mr-inter-" + string(work.workId)
+	oname := "mr-inter-" + string(work.mapWorkId)
 	ofile, _ := os.Create(oname)
 	for _, kv := range intermediate {
 		fmt.Fprintf(ofile, "%v\n", kv.Key)
 	}
 	CallMapFinish(oname)
 	// uncomment to send the Example RPC to the coordinator.
-	//Second step Call Reduce task
+	// step2 Call Reduce task
+	for {
+		ret := CallReduce(&work) //ret = false means map Step unfinished
+		if !ret {
+			time.Sleep(time.Second)
+		}
+	}
 
 }
 
@@ -84,7 +92,7 @@ func CallMap(work *Work) bool {
 	// fill in the argument(s).
 
 	// declare a reply structure.
-	reply := MapReply{workId: work.workId}
+	reply := MapReply{workId: work.mapWorkId}
 
 	// send the RPC request, wait for the reply.
 	mapRet := call("Coordinator.MapTask", &args, &reply)
@@ -92,7 +100,7 @@ func CallMap(work *Work) bool {
 		return mapRet
 	}
 	work.mapFile = reply.fileName
-	work.workId = reply.workId
+	work.mapWorkId = reply.workId
 	return true
 }
 
@@ -100,6 +108,10 @@ func CallMapFinish(fileName string) {
 	args := MapArgs{fileName: fileName}
 	reply := MapReply{}
 	call("Coordinator.MapInform", &args, &reply)
+}
+
+func CallReduce(work *Work) bool {
+
 }
 
 //
