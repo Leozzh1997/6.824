@@ -38,9 +38,11 @@ func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
 			}
 			c.isRead[k] = true
 			reply.fileName = k
+			reply.fileAllocate = true
 			return nil
 		}
 	}
+	reply.fileAllocate = false
 	return nil
 }
 

@@ -128,6 +128,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		i = j
 	}
 	CallReduceFinish()
+	fmt.Println("All Finish")
 }
 
 //
@@ -146,9 +147,9 @@ func CallMap(work *Work) bool {
 	reply := MapReply{workId: work.mapWorkId}
 
 	// send the RPC request, wait for the reply.
-	mapRet := call("Coordinator.MapTask", &args, &reply)
-	if !mapRet {
-		return mapRet
+	call("Coordinator.MapTask", &args, &reply)
+	if !reply.fileAllocate {
+		return false
 	}
 	work.mapFile = reply.fileName
 	work.mapWorkId = reply.workId

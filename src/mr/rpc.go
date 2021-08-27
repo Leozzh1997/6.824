@@ -31,8 +31,9 @@ type MapArgs struct {
 }
 
 type MapReply struct {
-	fileName string
-	workId   int
+	fileName     string
+	workId       int
+	fileAllocate bool
 }
 
 type ReduceArgs struct {
