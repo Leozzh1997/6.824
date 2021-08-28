@@ -11,14 +11,14 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	files            []string
-	isRead           map[string]bool
-	nReduce          int
-	mapWorkId        int
-	intermediateFile []string
-	mapFinishNum     int
-	reduceWorkId     int
-	reduceFinishNum  int
+	Files            []string
+	IsRead           map[string]bool
+	NReduce          int
+	MapWorkId        int
+	IntermediateFile []string
+	MapFinishNum     int
+	ReduceWorkId     int
+	ReduceFinishNum  int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -28,47 +28,54 @@ type Coordinator struct {
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
+/*func (c *Coordinator) ExampleTask(args *ExampleArgs, reply *ExampleReply) error {
+	fmt.Println("Called")
+	reply.Y = args.X + 1
+	return nil
+}*/
 
-	for k, v := range c.isRead {
+func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
+	for k, v := range c.IsRead {
 		if !v {
-			if reply.workId == -1 {
-				reply.workId = c.mapWorkId
-				c.mapWorkId++
+			if args.WorkId == -1 {
+				reply.WorkId = c.MapWorkId
+				c.MapWorkId++
 			}
-			c.isRead[k] = true
-			reply.fileName = k
-			reply.fileAllocate = true
+			c.IsRead[k] = true
+			reply.FileName = k
+			reply.FileAllocate = true
 			return nil
 		}
 	}
-	reply.fileAllocate = false
+
+	reply.FileAllocate = false
 	return nil
 }
 
 func (c *Coordinator) MapFinish(args *MapArgs, reply *MapReply) error {
-	if args.fileName == "" {
+	if args.FileName == "" {
 		return errors.New("No file given")
 	}
-	c.intermediateFile = append(c.intermediateFile, args.fileName)
-	c.mapFinishNum++
+	c.IntermediateFile = append(c.IntermediateFile, args.FileName)
+	c.MapFinishNum++
 	return nil
 }
 
 func (c *Coordinator) ReduceTask(args *ReduceArgs, reply *ReduceReply) error {
-	if c.mapFinishNum < c.mapWorkId {
-		reply.mapFinish = false
+	if c.MapFinishNum < c.MapWorkId {
+		reply.MapFinish = false
 		return nil
 	}
-	reply.workId = c.reduceWorkId
-	reply.fileName = c.intermediateFile
-	reply.nReduce = c.nReduce
-	c.reduceWorkId++
+	reply.MapFinish = true
+	reply.WorkId = c.ReduceWorkId
+	reply.FileName = c.IntermediateFile
+	reply.NReduce = c.NReduce
+	c.ReduceWorkId++
 	return nil
 }
 
-func (c *Coordinator) ReduceFinish(args *ReduceArgs, reply *ReduceArgs) error {
-	c.reduceFinishNum++
+func (c *Coordinator) ReduceFinish(args *ReduceArgs, reply *ReduceReply) error {
+	c.ReduceFinishNum++
 	return nil
 }
 
@@ -97,7 +104,7 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 	//Return true when all of reduce tasks finish.
-	if c.reduceFinishNum == c.nReduce {
+	if c.ReduceFinishNum == c.NReduce {
 		ret = true
 	}
 	return ret
@@ -120,7 +127,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		isRead[file] = false
 	}
 	c := Coordinator{files, isRead, nReduce - 8, mapWordId, nil, 0, 0, 0}
-
 	// Your code here.
 
 	c.server()

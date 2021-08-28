@@ -16,35 +16,35 @@ import (
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
+/*type ExampleArgs struct {
 	X int
 }
 
 type ExampleReply struct {
 	Y int
-}
+}*/
 
 // Add your RPC definitions here.
 type MapArgs struct {
-	workId   int
-	fileName string
+	WorkId   int
+	FileName string
 }
 
 type MapReply struct {
-	fileName     string
-	workId       int
-	fileAllocate bool
+	FileName     string
+	WorkId       int
+	FileAllocate bool
 }
 
 type ReduceArgs struct {
-	fileName string
+	FileName string
 }
 
 type ReduceReply struct {
-	fileName  []string
-	workId    int
-	mapFinish bool
-	nReduce   int
+	FileName  []string
+	WorkId    int
+	MapFinish bool
+	NReduce   int
 }
 
 // Cook up a unique-ish UNIX-domain socket name
