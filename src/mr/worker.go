@@ -85,6 +85,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		CallMapFinish(oname)
 		CallMapFinish(oname)
+		for {
+			i := 0
+			if i == 0 {
+				break
+			}
+		}
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
