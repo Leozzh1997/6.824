@@ -73,7 +73,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		kva := mapf(work.MapFile, string(content))
 		intermediate = append(intermediate, kva...)
 	}
-	fmt.Println(work.MapWorkId)
+	//fmt.Println(work.MapWorkId)
 	if work.MapWorkId != -1 {
 		oname := "mr-inter-" + strconv.Itoa(work.MapWorkId) + ".txt"
 		ofile, err := os.Create(oname)
@@ -83,6 +83,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		for _, kv := range intermediate {
 			fmt.Fprintf(ofile, "%v\n", kv.Key)
 		}
+		CallMapFinish(oname)
 		CallMapFinish(oname)
 	}
 
@@ -109,6 +110,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		content, err := ioutil.ReadAll(file)
 		words := strings.FieldsFunc(string(content), ff)
+		//error ihash should be used by mapStep
 		for _, word := range words {
 			if ihash(word)%work.NReduce == work.ReduceWorkId {
 				reducePre = append(reducePre, word)
@@ -133,7 +135,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		i = j
 	}
 	CallReduceFinish()
-	fmt.Println("All Finish")
+	//fmt.Println("All Finish")
 	//CallExample()
 }
 
