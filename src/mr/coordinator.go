@@ -72,16 +72,16 @@ func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
 }
 
 func (c *Coordinator) MapFinish(args *MapArgs, reply *MapReply) error {
-	if args.FileName == "" {
+	if args.Files == nil {
 		return errors.New("No file given")
 	}
-	c.IntermediateFile = append(c.IntermediateFile, args.FileName)
+	//c.IntermediateFile = append(c.IntermediateFile, args.FileName)
 	c.MapFinishNum++
 	return nil
 }
 
 func (c *Coordinator) ReduceTask(args *ReduceArgs, reply *ReduceReply) error {
-	if c.MapFinishNum < c.MapWorkId {
+	/*if c.MapFinishNum < c.MapWorkId {
 		reply.MapFinish = false
 		return nil
 	}
@@ -89,11 +89,13 @@ func (c *Coordinator) ReduceTask(args *ReduceArgs, reply *ReduceReply) error {
 	reply.WorkId = c.ReduceWorkId
 	reply.FileName = c.IntermediateFile
 	reply.NReduce = c.NReduce
-	c.ReduceWorkId++
+	c.ReduceWorkId++*/
 	return nil
 }
 
 func (c *Coordinator) ReduceFinish(args *ReduceArgs, reply *ReduceReply) error {
+	id := args.ReduceTaskId
+	c.ReduceTaskAllocate[id].IsFinish = true
 	c.ReduceFinishNum++
 	return nil
 }
