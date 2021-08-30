@@ -29,8 +29,8 @@ type Work struct {
 	MapWorkId    int
 	NReduce      int
 	ReduceTaskId int
-	IsAllocate bool
-	IsFinish bool
+	IsAllocate   bool
+	IsFinish     bool
 }
 
 type cmp []string
@@ -57,8 +57,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	//step1 Call MapTask and
 	//inform coordinator intermediateFile
-	work := Work{MapWorkId: -1, ReduceWorkId: -1}
-	intermediate := []KeyValue{}
+	work := Work{}
 	for {
 		CallMap(&work)
 		if work.IsFinish {
@@ -79,42 +78,34 @@ func Worker(mapf func(string, string) []KeyValue,
 		file.Close()
 		kva := mapf(work.MapFile, string(content))
 		NReduce := work.NReduce
-		intermediate := make([][]KeyValue,NReduce)
-		for _,kv := range kva{
-			reduceNum = ihash(kv.key) % NReduce
-			intermediate[reduceNum] = append(intermediate[reduceNum],kv)
+		intermediate := make([][]KeyValue, NReduce)
+		for _, kv := range kva {
+			reduceNum := ihash(kv.Key) % NReduce
+			intermediate[reduceNum] = append(intermediate[reduceNum], kv)
 		}
-		for i := 0;i < NReduce;i++ {
-			oname := "mr-" + strconv.Itoa(work.WorkId) + "-"+strconv.Itoa(i)
-			ofile,err := os.Create(oname)
+		for i := 0; i < NReduce; i++ {
+			oname := "mr-" + strconv.Itoa(work.MapWorkId) + "-" + strconv.Itoa(i)
+			ofile, err := os.Create(oname)
 			if err != nil {
 				fmt.Println(err)
 			}
 			for _, kv := range intermediate[i] {
 				fmt.Fprintf(ofile, "%v\n", kv.Key)
 			}
-			file := FileWithId{oname,i}
-			work.MapInterFile = append(work.MapInterFile,file)
+			file := FileWithId{oname, i}
+			work.MapInterFile = append(work.MapInterFile, file)
 		}
 		CallMapFinish(&work)
 	}
 	// uncomment to send the Example RPC to the coordinator.
 	// Call Reduce task
 	//ret = false means map Step unfinished
+	//execute reducef
 	for {
-		if ret := CallReduce(&work); ret {
+		CallReduce(&work)
+		if work.IsFinish {
 			break
 		}
-		time.Sleep(time.Second)
-	}
-	if work.ReduceWorkId == -1 {
-		fmt.Println("Enough Worker")
-		return
-	}
-	//execute reducef
-	for{
-		CallReduce(&work)
-		if work.IsFinish { break }
 		if !work.IsAllocate {
 			time.Sleep(time.Second)
 			continue
@@ -183,7 +174,7 @@ func Worker(mapf func(string, string) []KeyValue,
 func CallMap(work *Work) {
 
 	// declare an argument structure.
-	args := MapArgs{WorkId: work.MapWorkId}
+	args := MapArgs{}
 	// fill in the argument(s).
 
 	// declare a reply structure.
@@ -191,14 +182,14 @@ func CallMap(work *Work) {
 
 	// send the RPC request, wait for the reply.
 	call("Coordinator.MapTask", &args, &reply)
-	work.MapFile = reply.FileName
+	work.MapFile = reply.MapFile
 	work.MapWorkId = reply.WorkId
 	work.IsAllocate = reply.MapFileAllocate
-	work.IsFinish - reply.MapFinish
+	work.IsFinish = reply.MapFinish
 }
 
 func CallMapFinish(work *Work) {
-	args := MapArgs{Files: work.MapInterFile,MapFileName: work.MapFile}
+	args := MapArgs{Files: work.MapInterFile, MapFileName: work.MapFile}
 	reply := MapReply{}
 	call("Coordinator.MapFinish", &args, &reply)
 }
@@ -208,8 +199,8 @@ func CallReduce(work *Work) {
 	reply := ReduceReply{}
 	call("Coordinator.ReduceTask", &args, &reply)
 
-	work.IsAllocate = reply.MapFileAllocate
-	work.IsFinish = reply.MapFinish
+	work.IsAllocate = reply.ReduceFileAllocate
+	work.IsFinish = reply.ReduceFinish
 	work.ReduceTaskId = reply.ReduceTaskId
 	work.ReduceFile = reply.ReduceFile
 }

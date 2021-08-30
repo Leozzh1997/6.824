@@ -7,25 +7,26 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"time"
 )
 
-type FileDescribetor struct{
-	IsAllocate bool
-	IsFinish bool
-	AllocateTime int
-	ReduceFile []string
+type FileDescribetor struct {
+	IsAllocate   bool
+	IsFinish     bool
+	AllocateTime int64
+	ReduceFile   []string
 }
 
 type Coordinator struct {
 	// Your definitions here.
-	MapFiles []string
-	MapFilesNum int            
-	MapTaskAllocate          map[string]FileDescribetor
+	MapFiles           []string
+	MapFilesNum        int
+	MapTaskAllocate    map[string]*FileDescribetor
 	ReduceTaskAllocate []FileDescribetor
-	NReduce          int
-	MapWorkId        int
-	MapFinishNum     int
-	ReduceFinishNum  int
+	NReduce            int
+	MapWorkId          int
+	MapFinishNum       int
+	ReduceFinishNum    int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -47,24 +48,26 @@ func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
 		return nil
 	}
 	for _, file := range c.MapFiles {
-		if MapTaskAllocate[file].IsFinish { continue }
-		if !MapTaskAllocate[file].IsAllocate {
-			MapTaskAllocate[file].IsAllocate = true
-			MapTaskAllocate[file].AllocateTime = time.Now().Unix() 
+		if c.MapTaskAllocate[file].IsFinish {
+			continue
+		}
+		if !c.MapTaskAllocate[file].IsAllocate {
+			c.MapTaskAllocate[file].IsAllocate = true
+			c.MapTaskAllocate[file].AllocateTime = time.Now().Unix()
 			reply.MapFileAllocate = true
 			reply.MapFile = file
 			return nil
 		}
-		T := time.Second*10
-		t := time.Now().Unix() - MapTaskAllocate[file].AllocateTime// test worker crash
+		var T int64 = 10
+		t := time.Now().Unix() - c.MapTaskAllocate[file].AllocateTime // test worker crash
 		if t > T {
-			MapTaskAllocate[file].AllocateTime = time.Now().Unix()
+			c.MapTaskAllocate[file].AllocateTime = time.Now().Unix()
 			reply.MapFileAllocate = true
 			reply.MapFile = file
 			return nil
 		}
 	}
-	reply.FileAllocate = false
+	reply.MapFileAllocate = false
 	return nil
 }
 
