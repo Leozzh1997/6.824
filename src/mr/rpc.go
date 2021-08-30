@@ -25,26 +25,34 @@ type ExampleReply struct {
 }*/
 
 // Add your RPC definitions here.
-type MapArgs struct {
-	WorkId   int
+type FileWithId struct {
 	FileName string
+	Id int
+}
+
+type MapArgs struct {
+	Files []FileWithId
+	MapFileName string //coordinator give a file to worker to do mapTask
 }
 
 type MapReply struct {
-	FileName     string
+	MapFile     string
 	WorkId       int
-	FileAllocate bool
+	MapFileAllocate bool
+	MapFinish bool
+	NReduce int
 }
 
 type ReduceArgs struct {
-	FileName string
+	FileName FileWithId //mr-out-X
+	ReduceTaskId int
 }
 
 type ReduceReply struct {
-	FileName  []string
-	WorkId    int
-	MapFinish bool
-	NReduce   int
+	ReduceFile  []string
+	ReduceTaskId int
+	ReduceFileAllocate    bool
+	ReduceFinish bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name

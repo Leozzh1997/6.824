@@ -9,15 +9,22 @@ import (
 	"os"
 )
 
+type FileDescribetor struct{
+	IsAllocate bool
+	IsFinish bool
+	AllocateTime int
+	ReduceFile []string
+}
+
 type Coordinator struct {
 	// Your definitions here.
-	Files            []string
-	IsRead           map[string]bool
+	MapFiles []string
+	MapFilesNum int            
+	MapTaskAllocate          map[string]FileDescribetor
+	ReduceTaskAllocate []FileDescribetor
 	NReduce          int
 	MapWorkId        int
-	IntermediateFile []string
 	MapFinishNum     int
-	ReduceWorkId     int
 	ReduceFinishNum  int
 }
 
@@ -35,19 +42,28 @@ type Coordinator struct {
 }*/
 
 func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
-	for k, v := range c.IsRead {
-		if !v {
-			if args.WorkId == -1 {
-				reply.WorkId = c.MapWorkId
-				c.MapWorkId++
-			}
-			c.IsRead[k] = true
-			reply.FileName = k
-			reply.FileAllocate = true
+	if c.MapFinishNum == len(c.MapFiles) {
+		reply.MapFinish = true
+		return nil
+	}
+	for _, file := range c.MapFiles {
+		if MapTaskAllocate[file].IsFinish { continue }
+		if !MapTaskAllocate[file].IsAllocate {
+			MapTaskAllocate[file].IsAllocate = true
+			MapTaskAllocate[file].AllocateTime = time.Now().Unix() 
+			reply.MapFileAllocate = true
+			reply.MapFile = file
+			return nil
+		}
+		T := time.Second*10
+		t := time.Now().Unix() - MapTaskAllocate[file].AllocateTime// test worker crash
+		if t > T {
+			MapTaskAllocate[file].AllocateTime = time.Now().Unix()
+			reply.MapFileAllocate = true
+			reply.MapFile = file
 			return nil
 		}
 	}
-
 	reply.FileAllocate = false
 	return nil
 }

@@ -25,9 +25,12 @@ type KeyValue struct {
 type Work struct {
 	MapFile      string
 	ReduceFile   []string
+	MapInterFile []FileWithId
 	MapWorkId    int
-	ReduceWorkId int
 	NReduce      int
+	ReduceTaskId int
+	IsAllocate bool
+	IsFinish bool
 }
 
 type cmp []string
@@ -57,9 +60,13 @@ func Worker(mapf func(string, string) []KeyValue,
 	work := Work{MapWorkId: -1, ReduceWorkId: -1}
 	intermediate := []KeyValue{}
 	for {
-		mapRet := CallMap(&work)
-		if !mapRet {
+		CallMap(&work)
+		if work.IsFinish {
 			break
+		}
+		if !work.IsAllocate {
+			time.Sleep(time.Second)
+			continue
 		}
 		file, err := os.Open(work.MapFile)
 		if err != nil {
@@ -71,28 +78,26 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		file.Close()
 		kva := mapf(work.MapFile, string(content))
-		intermediate = append(intermediate, kva...)
-	}
-	//fmt.Println(work.MapWorkId)
-	if work.MapWorkId != -1 {
-		oname := "mr-inter-" + strconv.Itoa(work.MapWorkId) + ".txt"
-		ofile, err := os.Create(oname)
-		if err != nil {
-			fmt.Println(err)
+		NReduce := work.NReduce
+		intermediate := make([][]KeyValue,NReduce)
+		for _,kv := range kva{
+			reduceNum = ihash(kv.key) % NReduce
+			intermediate[reduceNum] = append(intermediate[reduceNum],kv)
 		}
-		for _, kv := range intermediate {
-			fmt.Fprintf(ofile, "%v\n", kv.Key)
-		}
-		CallMapFinish(oname)
-		CallMapFinish(oname)
-		for {
-			i := 0
-			if i == 0 {
-				break
+		for i := 0;i < NReduce;i++ {
+			oname := "mr-" + strconv.Itoa(work.WorkId) + "-"+strconv.Itoa(i)
+			ofile,err := os.Create(oname)
+			if err != nil {
+				fmt.Println(err)
 			}
+			for _, kv := range intermediate[i] {
+				fmt.Fprintf(ofile, "%v\n", kv.Key)
+			}
+			file := FileWithId{oname,i}
+			work.MapInterFile = append(work.MapInterFile,file)
 		}
+		CallMapFinish(&work)
 	}
-
 	// uncomment to send the Example RPC to the coordinator.
 	// Call Reduce task
 	//ret = false means map Step unfinished
@@ -107,40 +112,47 @@ func Worker(mapf func(string, string) []KeyValue,
 		return
 	}
 	//execute reducef
-	ff := func(r rune) bool { return !unicode.IsLetter(r) }
-	reducePre := []string{}
-	for _, filename := range work.ReduceFile {
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatal("can't open file")
+	for{
+		CallReduce(&work)
+		if work.IsFinish { break }
+		if !work.IsAllocate {
+			time.Sleep(time.Second)
+			continue
 		}
-		content, err := ioutil.ReadAll(file)
-		words := strings.FieldsFunc(string(content), ff)
-		//error ihash should be used by mapStep
-		for _, word := range words {
-			if ihash(word)%work.NReduce == work.ReduceWorkId {
+		ff := func(r rune) bool { return !unicode.IsLetter(r) }
+		reducePre := []string{}
+		for _, filename := range work.ReduceFile {
+			file, err := os.Open(filename)
+			if err != nil {
+				log.Fatal("can't open file")
+			}
+			content, err := ioutil.ReadAll(file)
+			words := strings.FieldsFunc(string(content), ff)
+			//error ihash should be used by mapStep
+			for _, word := range words {
 				reducePre = append(reducePre, word)
 			}
 		}
-	}
-	oname := "mr-out-" + strconv.Itoa(work.ReduceWorkId) + ".txt"
-	ofile, _ := os.Create(oname)
-	sort.Sort(cmp(reducePre))
-	i := 0
-	for i < len(reducePre) {
-		j := i + 1
-		for j < len(reducePre) && reducePre[j] == reducePre[i] {
-			j++
+		oname := "mr-out-" + strconv.Itoa(work.ReduceTaskId)
+		os.Remove(oname)
+		ofile, _ := os.Create(oname)
+		sort.Sort(cmp(reducePre))
+		i := 0
+		for i < len(reducePre) {
+			j := i + 1
+			for j < len(reducePre) && reducePre[j] == reducePre[i] {
+				j++
+			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, reducePre[i])
+			}
+			output := reducef(reducePre[i], values)
+			fmt.Fprintf(ofile, "%v %v\n", reducePre[i], output)
+			i = j
 		}
-		values := []string{}
-		for k := i; k < j; k++ {
-			values = append(values, reducePre[i])
-		}
-		output := reducef(reducePre[i], values)
-		fmt.Fprintf(ofile, "%v %v\n", reducePre[i], output)
-		i = j
+		CallReduceFinish(work.ReduceTaskId)
 	}
-	CallReduceFinish()
 	//fmt.Println("All Finish")
 	//CallExample()
 }
@@ -168,7 +180,7 @@ func Worker(mapf func(string, string) []KeyValue,
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func CallMap(work *Work) bool {
+func CallMap(work *Work) {
 
 	// declare an argument structure.
 	args := MapArgs{WorkId: work.MapWorkId}
@@ -179,37 +191,32 @@ func CallMap(work *Work) bool {
 
 	// send the RPC request, wait for the reply.
 	call("Coordinator.MapTask", &args, &reply)
-	if !reply.FileAllocate {
-		return false
-	}
-	//fmt.Printf("%v %v\n", reply.WorkId, reply.FileName)
 	work.MapFile = reply.FileName
 	work.MapWorkId = reply.WorkId
-	return true
+	work.IsAllocate = reply.MapFileAllocate
+	work.IsFinish - reply.MapFinish
 }
 
-func CallMapFinish(fileName string) {
-	args := MapArgs{FileName: fileName}
+func CallMapFinish(work *Work) {
+	args := MapArgs{Files: work.MapInterFile,MapFileName: work.MapFile}
 	reply := MapReply{}
 	call("Coordinator.MapFinish", &args, &reply)
-
 }
 
-func CallReduce(work *Work) bool {
+func CallReduce(work *Work) {
 	args := ReduceArgs{}
 	reply := ReduceReply{}
 	call("Coordinator.ReduceTask", &args, &reply)
-	if !reply.MapFinish {
-		return false
-	}
-	work.ReduceWorkId = reply.WorkId
-	work.ReduceFile = reply.FileName
-	work.NReduce = reply.NReduce
-	return true
+
+	work.IsAllocate = reply.MapFileAllocate
+	work.IsFinish = reply.MapFinish
+	work.ReduceTaskId = reply.ReduceTaskId
+	work.ReduceFile = reply.ReduceFile
 }
 
-func CallReduceFinish() {
+func CallReduceFinish(id int) {
 	args := ReduceArgs{}
+	args.ReduceTaskId = id
 	reply := ReduceReply{}
 	call("Coordinator.ReduceFinish", &args, &reply)
 }
