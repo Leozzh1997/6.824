@@ -56,6 +56,9 @@ func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
 			c.MapTaskAllocate[file].AllocateTime = time.Now().Unix()
 			reply.MapFileAllocate = true
 			reply.MapFile = file
+			reply.NReduce = c.NReduce
+			reply.WorkId = c.MapWorkId
+			c.MapWorkId++
 			return nil
 		}
 		var T int64 = 10
@@ -64,6 +67,9 @@ func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
 			c.MapTaskAllocate[file].AllocateTime = time.Now().Unix()
 			reply.MapFileAllocate = true
 			reply.MapFile = file
+			reply.NReduce = c.NReduce
+			reply.WorkId = c.MapWorkId
+			c.MapWorkId++
 			return nil
 		}
 	}
@@ -90,6 +96,7 @@ func (c *Coordinator) ReduceTask(args *ReduceArgs, reply *ReduceReply) error {
 	}
 	nReduce := c.NReduce
 	for i := 0; i < nReduce; i++ {
+		if c.ReduceTaskAllocate[i].IsFinish { continue }
 		if !c.ReduceTaskAllocate[i].IsAllocate {
 			c.ReduceTaskAllocate[i].IsAllocate = true
 			c.ReduceTaskAllocate[i].AllocateTime = time.Now().Unix()
@@ -165,6 +172,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.MapFiles = append(c.MapFiles, files...)
 	c.MapFilesNum = len(files)
+	c.MapTaskAllocate = make(map[string]*FileDescribetor)
 	for _, file := range files {
 		fileDescribetor := FileDescribetor{false, false, 0, nil}
 		c.MapTaskAllocate[file] = &fileDescribetor

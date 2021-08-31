@@ -76,8 +76,13 @@ func Worker(mapf func(string, string) []KeyValue,
 			log.Fatalf("cannot read %v", work.MapFile)
 		}
 		file.Close()
+		//fmt.Print(work.MapFile)
 		kva := mapf(work.MapFile, string(content))
 		NReduce := work.NReduce
+		if NReduce == 0 {
+			os.Exit(1)
+		}
+		work.MapInterFile = work.MapInterFile[:0]
 		intermediate := make([][]KeyValue, NReduce)
 		for _, kv := range kva {
 			reduceNum := ihash(kv.Key) % NReduce
@@ -95,6 +100,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			file := FileWithId{oname, i}
 			work.MapInterFile = append(work.MapInterFile, file)
 		}
+		//fmt.Println(work.MapInterFile)
 		CallMapFinish(&work)
 	}
 	// uncomment to send the Example RPC to the coordinator.
@@ -110,6 +116,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			time.Sleep(time.Second)
 			continue
 		}
+		//fmt.Println(work.ReduceFile)
 		ff := func(r rune) bool { return !unicode.IsLetter(r) }
 		reducePre := []string{}
 		for _, filename := range work.ReduceFile {
@@ -126,7 +133,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			reducePre = append(reducePre, words...)
 		}
 		oname := "mr-out-" + strconv.Itoa(work.ReduceTaskId)
-		os.Remove(oname)
+		os.Remove(oname)//if a worker write the file and crash a new worker should delet it and rewrite
 		ofile, _ := os.Create(oname)
 		sort.Sort(cmp(reducePre))
 		i := 0
@@ -187,6 +194,7 @@ func CallMap(work *Work) {
 	work.MapWorkId = reply.WorkId
 	work.IsAllocate = reply.MapFileAllocate
 	work.IsFinish = reply.MapFinish
+	work.NReduce = reply.NReduce
 }
 
 func CallMapFinish(work *Work) {
