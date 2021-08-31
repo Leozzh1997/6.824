@@ -118,11 +118,12 @@ func Worker(mapf func(string, string) []KeyValue,
 				log.Fatal("can't open file")
 			}
 			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				fmt.Println(err)
+			}
 			words := strings.FieldsFunc(string(content), ff)
 			//error ihash should be used by mapStep
-			for _, word := range words {
-				reducePre = append(reducePre, word)
-			}
+			reducePre = append(reducePre, words...)
 		}
 		oname := "mr-out-" + strconv.Itoa(work.ReduceTaskId)
 		os.Remove(oname)

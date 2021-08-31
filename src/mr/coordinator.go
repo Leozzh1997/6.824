@@ -73,23 +73,42 @@ func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
 
 func (c *Coordinator) MapFinish(args *MapArgs, reply *MapReply) error {
 	if args.Files == nil {
-		return errors.New("No file given")
+		return errors.New("file not given")
 	}
-	//c.IntermediateFile = append(c.IntermediateFile, args.FileName)
+	for _, file := range args.Files {
+		c.ReduceTaskAllocate[file.Id].ReduceFile = append(c.ReduceTaskAllocate[file.Id].ReduceFile, file.FileName)
+	}
+	c.MapTaskAllocate[args.MapFileName].IsFinish = true
 	c.MapFinishNum++
 	return nil
 }
 
 func (c *Coordinator) ReduceTask(args *ReduceArgs, reply *ReduceReply) error {
-	/*if c.MapFinishNum < c.MapWorkId {
-		reply.MapFinish = false
+	if c.NReduce == c.ReduceFinishNum {
+		reply.ReduceFinish = true
 		return nil
 	}
-	reply.MapFinish = true
-	reply.WorkId = c.ReduceWorkId
-	reply.FileName = c.IntermediateFile
-	reply.NReduce = c.NReduce
-	c.ReduceWorkId++*/
+	nReduce := c.NReduce
+	for i := 0; i < nReduce; i++ {
+		if !c.ReduceTaskAllocate[i].IsAllocate {
+			c.ReduceTaskAllocate[i].IsAllocate = true
+			c.ReduceTaskAllocate[i].AllocateTime = time.Now().Unix()
+			reply.ReduceFile = append(reply.ReduceFile, c.ReduceTaskAllocate[i].ReduceFile...)
+			reply.ReduceFileAllocate = true
+			reply.ReduceTaskId = i
+			return nil
+		}
+		var T int64 = 10
+		t := time.Now().Unix() - c.ReduceTaskAllocate[i].AllocateTime
+		if t > T {
+			c.ReduceTaskAllocate[i].AllocateTime = time.Now().Unix()
+			reply.ReduceFile = append(reply.ReduceFile, c.ReduceTaskAllocate[i].ReduceFile...)
+			reply.ReduceFileAllocate = true
+			reply.ReduceTaskId = i
+			return nil
+		}
+	}
+	reply.ReduceFileAllocate = false
 	return nil
 }
 
@@ -127,6 +146,7 @@ func (c *Coordinator) Done() bool {
 	//Return true when all of reduce tasks finish.
 	if c.ReduceFinishNum == c.NReduce {
 		ret = true
+		os.Remove(coordinatorSock())
 	}
 	return ret
 }
@@ -142,13 +162,22 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	//response a filename that unused to workers to do map task
 	//if the map process is finished,inform worker to do reduce task
 	//
-	mapWordId := 0
-	isRead := map[string]bool{}
+	c := Coordinator{}
+	c.MapFiles = append(c.MapFiles, files...)
+	c.MapFilesNum = len(files)
 	for _, file := range files {
-		isRead[file] = false
+		fileDescribetor := FileDescribetor{false, false, 0, nil}
+		c.MapTaskAllocate[file] = &fileDescribetor
 	}
-	c := Coordinator{files, isRead, nReduce - 8, mapWordId, nil, 0, 0, 0}
-	// Your code here.
+	c.NReduce = nReduce
+	c.MapWorkId = 0
+	c.MapFinishNum = 0
+	c.ReduceFinishNum = 0
+	for i := 0; i < nReduce; i++ {
+		s := []string{}
+		fileDescribetor := FileDescribetor{false, false, 0, s}
+		c.ReduceTaskAllocate = append(c.ReduceTaskAllocate, fileDescribetor)
+	}
 
 	c.server()
 	return &c
