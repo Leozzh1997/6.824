@@ -133,7 +133,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			reducePre = append(reducePre, words...)
 		}
 		oname := "mr-out-" + strconv.Itoa(work.ReduceTaskId)
-		os.Remove(oname)//if a worker write the file and crash a new worker should delet it and rewrite
+		os.Remove(oname) //if a worker write the file and crash a new worker should delet it and rewrite
 		ofile, _ := os.Create(oname)
 		sort.Sort(cmp(reducePre))
 		i := 0

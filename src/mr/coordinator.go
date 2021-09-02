@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type FileDescribetor struct {
 
 type Coordinator struct {
 	// Your definitions here.
+	mu                 sync.Mutex
 	MapFiles           []string
 	MapFilesNum        int
 	MapTaskAllocate    map[string]*FileDescribetor
@@ -43,6 +45,10 @@ type Coordinator struct {
 }*/
 
 func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.MapFinishNum == len(c.MapFiles) {
 		reply.MapFinish = true
 		return nil
@@ -78,6 +84,10 @@ func (c *Coordinator) MapTask(args *MapArgs, reply *MapReply) error {
 }
 
 func (c *Coordinator) MapFinish(args *MapArgs, reply *MapReply) error {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if args.Files == nil {
 		return errors.New("file not given")
 	}
@@ -90,13 +100,19 @@ func (c *Coordinator) MapFinish(args *MapArgs, reply *MapReply) error {
 }
 
 func (c *Coordinator) ReduceTask(args *ReduceArgs, reply *ReduceReply) error {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.NReduce == c.ReduceFinishNum {
 		reply.ReduceFinish = true
 		return nil
 	}
 	nReduce := c.NReduce
 	for i := 0; i < nReduce; i++ {
-		if c.ReduceTaskAllocate[i].IsFinish { continue }
+		if c.ReduceTaskAllocate[i].IsFinish {
+			continue
+		}
 		if !c.ReduceTaskAllocate[i].IsAllocate {
 			c.ReduceTaskAllocate[i].IsAllocate = true
 			c.ReduceTaskAllocate[i].AllocateTime = time.Now().Unix()
@@ -120,6 +136,10 @@ func (c *Coordinator) ReduceTask(args *ReduceArgs, reply *ReduceReply) error {
 }
 
 func (c *Coordinator) ReduceFinish(args *ReduceArgs, reply *ReduceReply) error {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	id := args.ReduceTaskId
 	c.ReduceTaskAllocate[id].IsFinish = true
 	c.ReduceFinishNum++
@@ -151,9 +171,11 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 	//Return true when all of reduce tasks finish.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.ReduceFinishNum == c.NReduce {
 		ret = true
-		os.Remove(coordinatorSock())
+		//os.Remove(coordinatorSock())
 	}
 	return ret
 }
