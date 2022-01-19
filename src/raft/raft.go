@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -63,16 +62,16 @@ type Entry struct {
 const TICKER int64 = 100
 
 type Raft struct {
-	mu                   sync.Mutex          // Lock to protect shared access to this peer's state
-	peers                []*labrpc.ClientEnd // RPC end points of all peers
-	persister            *Persister          // Object to hold this peer's persisted state
-	me                   int                 // this peer's index into peers[]
-	voteFor              int
-	voteMeNum            int
-	voteRequestFinishNum int   //paralle launch gorountine voteRequest finishNum
-	dead                 int32 // set by Kill()
-	status               int   //0,1,2:follow,candidate,leader
-	currentTerm          int
+	mu          sync.Mutex          // Lock to protect shared access to this peer's state
+	peers       []*labrpc.ClientEnd // RPC end points of all peers
+	persister   *Persister          // Object to hold this peer's persisted state
+	me          int                 // this peer's index into peers[]
+	voteFor     int
+	voteFinish  int
+	voteMeNum   int
+	dead        int32 // set by Kill()
+	status      int   //0,1,2:follow,candidate,leader
+	currentTerm int
 	//isLeader             bool
 	leaderId    int
 	log         []Entry
@@ -199,6 +198,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.CandidateTerm
 		rf.status = 0
 	}
+	rf.lastTicker = time.Now().Unix()
 	reply.NodeTerm = rf.currentTerm
 	reply.VotedFor = rf.voteFor
 	// Your code here (2A, 2B).
@@ -256,11 +256,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	//log.Println("call suceed", rf.me, server)
 	if !ok {
 		//log.Println("RPC error callerId,callId", rf.me, server)
+		rf.voteFinish++
 		return ok
 	} else {
 		//log.Println("call suceed", rf.me, server)
 	}
-	//log.Println("succeed")
 	if reply.NodeTerm > rf.currentTerm {
 		rf.status = 0
 		rf.currentTerm = reply.NodeTerm
@@ -268,7 +268,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if reply.VotedFor == rf.me {
 		rf.voteMeNum++
 	}
-	rf.voteRequestFinishNum++
+	rf.voteFinish++
 	return ok
 }
 
@@ -339,7 +339,7 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		//log.Println("liveId", rf.me)
 		rand.Seed(time.Now().UnixNano())
-		selectTimeOut := rand.Intn(500) + 300
+		selectTimeOut := rand.Intn(500) + 500
 		time.Sleep(time.Duration(TICKER) * time.Millisecond)
 		rf.mu.Lock()
 		if rf.status != 2 {
@@ -351,9 +351,9 @@ func (rf *Raft) ticker() {
 				rf.currentTerm++
 				rf.voteFor = rf.me
 				rf.voteMeNum = 1
-				rf.voteRequestFinishNum = 0
+				rf.voteFinish = 0
 				rf.mu.Unlock()
-				log.Println("currentId,currentTerm", rf.me, rf.currentTerm)
+				//log.Println("currentId,currentTerm", rf.me, rf.currentTerm)
 				rf.startNewElection()
 			} else {
 				rf.mu.Unlock()
@@ -375,34 +375,28 @@ func (rf *Raft) ticker() {
 func (rf *Raft) startNewElection() {
 	args := RequestVoteArgs{rf.currentTerm, rf.me}
 	n := len(rf.peers)
+	cond := sync.NewCond(&rf.mu)
 	for i := 0; i < n; i++ {
 		if i == args.CandidateId {
 			continue
 		}
 		reply := RequestVoteReply{}
-		go rf.sendRequestVote(i, &args, &reply)
+		go func(x int) {
+			rf.sendRequestVote(x, &args, &reply)
+			cond.Broadcast()
+		}(i)
 	}
-	t := time.Now().UnixMilli()
-	timeOut := 2 * TICKER
-	for {
-		rf.mu.Lock()
-		if rf.status != 1 || rf.voteRequestFinishNum == n-1 {
-			rf.mu.Unlock()
-			break
-		}
-		if time.Now().UnixMilli()-t > timeOut {
-			rf.mu.Unlock()
-			break
-		}
-		if rf.voteMeNum > n/2 {
-			rf.status = 2
-			rf.voteFor = -1
-			log.Println("leaderId,term", rf.me, rf.currentTerm)
-			rf.mu.Unlock()
-			rf.sendHeartbeat()
-			break
-		}
-		rf.mu.Unlock()
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for rf.voteMeNum <= n/2 && rf.voteFinish < n-1 {
+		//log.Println("wait", rf.me)
+		cond.Wait()
+	}
+	if rf.voteMeNum > n/2 {
+		rf.status = 2
+		//log.Println("leaderId,term", rf.me, rf.currentTerm)
+		go rf.sendHeartbeat()
 	}
 }
 
