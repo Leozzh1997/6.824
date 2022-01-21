@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -64,8 +65,9 @@ const TICKER int64 = 100
 type Raft struct {
 	mu          sync.Mutex          // Lock to protect shared access to this peer's state
 	peers       []*labrpc.ClientEnd // RPC end points of all peers
-	persister   *Persister          // Object to hold this peer's persisted state
-	me          int                 // this peer's index into peers[]
+	applyChan   chan ApplyMsg
+	persister   *Persister // Object to hold this peer's persisted state
+	me          int        // this peer's index into peers[]
 	voteFor     int
 	voteFinish  int
 	voteMeNum   int
@@ -73,14 +75,15 @@ type Raft struct {
 	status      int   //0,1,2:follow,candidate,leader
 	currentTerm int
 	//isLeader             bool
-	leaderId    int
-	log         []Entry
+	logEty      []Entry
 	commitIndex int
 	lastApplied int
 	lastTicker  int64
 	//for leader
-	nextIndex  []int
-	matchIndex []int
+	appendReply   int
+	appendSuccess int
+	nextIndex     []int
+	matchIndex    []int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -178,13 +181,17 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	LeaderTerm int
-	LeaderId   int
-	Ety        *Entry
+	LeaderTerm   int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	LeaderCommit int
+	Log          []Entry
 }
 
 type AppendEntriesReply struct {
 	NodeTerm int
+	Success  bool
 }
 
 //
@@ -209,12 +216,30 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.NodeTerm = rf.currentTerm
+	if args.Log == nil {
+		reply.Success = true
+	}
 	if args.LeaderTerm >= rf.currentTerm {
 		rf.currentTerm = args.LeaderTerm
 		rf.status = 0
 		rf.voteFor = -1
 		rf.lastTicker = time.Now().UnixMilli()
+		if len(rf.logEty) == args.PrevLogIndex {
+			rf.logEty = append(rf.logEty, args.Log...)
+		}
+		//log.Println("flw", len(rf.logEty))
+		if rf.commitIndex < args.LeaderCommit {
+			if args.LeaderCommit < len(rf.logEty) {
+				rf.commitIndex = args.LeaderCommit
+			} else {
+				rf.commitIndex = len(rf.logEty)
+			}
+			//log.Println("flw", rf.me, rf.commitIndex)
+			go rf.sendMsg()
+		}
+		reply.Success = true
 	}
+
 	// Your code here (2A, 2B).
 }
 
@@ -252,11 +277,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	rf.voteFinish++
 	//log.Println("call suceed", rf.me, server)
 	if !ok {
 		//log.Println("RPC error callerId,callId", rf.me, server)
-		rf.voteFinish++
 		return ok
 	} else {
 		//log.Println("call suceed", rf.me, server)
@@ -268,7 +292,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if reply.VotedFor == rf.me {
 		rf.voteMeNum++
 	}
-	rf.voteFinish++
 	return ok
 }
 
@@ -276,6 +299,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if reply.Success {
+		rf.appendSuccess++
+	}
+	rf.appendReply++
 	if !ok {
 		//log.Println("RPC error AppendEn lederId,callId", rf.me, server)
 		return ok
@@ -303,13 +330,29 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index := 0
+	if rf.status == 2 {
+		ety := Entry{Command: command, Term: rf.currentTerm}
+		rf.logEty = append(rf.logEty, ety)
+		index = len(rf.logEty)
+		log.Println("isStart!", index)
+		go rf.sendHeartbeatOrEty(rf.logEty[index-1:], index)
+	}
 	// Your code here (2B).
 
-	return index, term, isLeader
+	return index, rf.currentTerm, rf.status == 2
+}
+
+func (rf *Raft) sendMsg() {
+	log.Println("id,index,commad", rf.me, rf.commitIndex, rf.logEty[rf.commitIndex-1].Command)
+	msg := ApplyMsg{
+		CommandValid: true,
+		Command:      rf.logEty[rf.commitIndex-1].Command,
+		CommandIndex: rf.commitIndex,
+	}
+	rf.applyChan <- msg
 }
 
 //
@@ -360,9 +403,13 @@ func (rf *Raft) ticker() {
 			}
 		} else {
 			//log.Println("sendHeartbeat,status", rf.me, rf.status)
-			rf.lastTicker = time.Now().UnixMilli()
-			rf.mu.Unlock()
-			rf.sendHeartbeat()
+			if time.Now().UnixMilli()-rf.lastTicker > TICKER {
+				rf.mu.Unlock()
+				rf.sendHeartbeatOrEty(nil, 0)
+			} else {
+				rf.mu.Unlock()
+			}
+
 		}
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -396,21 +443,54 @@ func (rf *Raft) startNewElection() {
 	if rf.voteMeNum > n/2 {
 		rf.status = 2
 		//log.Println("leaderId,term", rf.me, rf.currentTerm)
-		go rf.sendHeartbeat()
+		//go rf.sendHeartbeatOrEty(nil, 0)
 	}
 }
 
-func (rf *Raft) sendHeartbeat() {
+func (rf *Raft) sendHeartbeatOrEty(logEty []Entry, index int) {
 	rf.mu.Lock()
-	args := AppendEntriesArgs{rf.currentTerm, rf.me, nil}
+	//log.Println(index)
+	args := AppendEntriesArgs{
+		LeaderTerm:   rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: index - 1,
+		Log:          logEty,
+		LeaderCommit: rf.commitIndex,
+	}
+	if index > 1 {
+		args.PrevLogTerm = rf.logEty[index-2].Term
+	}
+	rf.appendReply = 0
+	rf.appendSuccess = 1
+	rf.lastTicker = time.Now().UnixMilli()
 	rf.mu.Unlock()
+	var cond = sync.NewCond(&rf.mu)
 	n := len(rf.peers)
 	for i := 0; i < n; i++ {
 		if i == rf.me {
 			continue
 		}
 		reply := AppendEntriesReply{}
-		go rf.sendAppendEntries(i, &args, &reply)
+		go func(x int) {
+			rf.sendAppendEntries(x, &args, &reply)
+			cond.Broadcast()
+		}(i)
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for rf.appendSuccess <= n/2 && rf.appendReply <= n-1 {
+		cond.Wait()
+		//log.Println("detect", index, rf.appendSuccess)
+	}
+	//log.Println("loglenth", index, rf.appendSuccess > n/2, rf.commitIndex < len(rf.logEty))
+	/*if logEty == nil {
+		log.Println("log nil")
+		return
+	}*/
+	if rf.appendSuccess > n/2 && rf.commitIndex < len(rf.logEty) && index != 0 {
+		rf.commitIndex = args.PrevLogIndex + len(logEty)
+		//log.Println("leader", rf.commitIndex)
+		go rf.sendMsg()
 	}
 }
 
@@ -435,6 +515,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastTicker = time.Now().UnixMilli()
 	rf.voteFor = -1
 	rf.currentTerm = 1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.applyChan = applyCh
+	rf.logEty = make([]Entry, 0)
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
