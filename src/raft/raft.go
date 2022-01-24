@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -299,15 +298,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if reply.Success {
-		rf.appendSuccess++
-	}
 	rf.appendReply++
 	if !ok {
 		//log.Println("RPC error AppendEn lederId,callId", rf.me, server)
 		return ok
+	}
+	if reply.Success {
+		rf.appendSuccess++
+		rf.nextIndex[server] = len(rf.logEty) + 1
 	} else {
-		//log.Println("Append suceed", rf.me, server)
+		rf.nextIndex[server]--
 	}
 	if reply.NodeTerm > rf.currentTerm {
 		rf.status = 0
@@ -337,8 +337,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		ety := Entry{Command: command, Term: rf.currentTerm}
 		rf.logEty = append(rf.logEty, ety)
 		index = len(rf.logEty)
-		log.Println("isStart!", index)
-		go rf.sendHeartbeatOrEty(rf.logEty[index-1:], index)
+		//log.Println("isStart!", rf.me)
 	}
 	// Your code here (2B).
 
@@ -346,13 +345,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) sendMsg() {
-	log.Println("id,index,commad", rf.me, rf.commitIndex, rf.logEty[rf.commitIndex-1].Command)
-	msg := ApplyMsg{
-		CommandValid: true,
-		Command:      rf.logEty[rf.commitIndex-1].Command,
-		CommandIndex: rf.commitIndex,
+	//log.Println("id,index", rf.me, rf.commitIndex)
+	rf.mu.Lock()
+	applied := rf.lastApplied + 1
+	commit := rf.commitIndex
+	rf.mu.Unlock()
+	for ; applied <= commit; applied++ {
+		rf.mu.Lock()
+		msg := ApplyMsg{
+			CommandValid: true,
+			Command:      rf.logEty[applied-1].Command,
+			CommandIndex: applied,
+		}
+		rf.mu.Unlock()
+		rf.applyChan <- msg
+		rf.mu.Lock()
+		rf.lastApplied++
+		rf.mu.Unlock()
 	}
-	rf.applyChan <- msg
 }
 
 //
@@ -383,8 +393,11 @@ func (rf *Raft) ticker() {
 		//log.Println("liveId", rf.me)
 		rand.Seed(time.Now().UnixNano())
 		selectTimeOut := rand.Intn(500) + 500
-		time.Sleep(time.Duration(TICKER) * time.Millisecond)
+		//time.Sleep(time.Duration(TICKER) * time.Millisecond)
 		rf.mu.Lock()
+		/*if rf.lastApplied < rf.commitIndex {
+			go rf.sendMsg()
+		}*/
 		if rf.status != 2 {
 			rf.mu.Unlock()
 			time.Sleep(time.Duration(selectTimeOut) * time.Millisecond)
@@ -402,10 +415,10 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock()
 			}
 		} else {
-			//log.Println("sendHeartbeat,status", rf.me, rf.status)
 			if time.Now().UnixMilli()-rf.lastTicker > TICKER {
+				//log.Println("leader,term", rf.me, rf.currentTerm, len(rf.logEty))
 				rf.mu.Unlock()
-				rf.sendHeartbeatOrEty(nil, 0)
+				rf.sendHeartbeatOrEty()
 			} else {
 				rf.mu.Unlock()
 			}
@@ -442,27 +455,21 @@ func (rf *Raft) startNewElection() {
 	}
 	if rf.voteMeNum > n/2 {
 		rf.status = 2
+		for i := 0; i < n; i++ {
+			rf.nextIndex = append(rf.nextIndex, len(rf.logEty)+1)
+		}
 		//log.Println("leaderId,term", rf.me, rf.currentTerm)
 		//go rf.sendHeartbeatOrEty(nil, 0)
 	}
 }
 
-func (rf *Raft) sendHeartbeatOrEty(logEty []Entry, index int) {
+func (rf *Raft) sendHeartbeatOrEty() {
 	rf.mu.Lock()
 	//log.Println(index)
-	args := AppendEntriesArgs{
-		LeaderTerm:   rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: index - 1,
-		Log:          logEty,
-		LeaderCommit: rf.commitIndex,
-	}
-	if index > 1 {
-		args.PrevLogTerm = rf.logEty[index-2].Term
-	}
 	rf.appendReply = 0
 	rf.appendSuccess = 1
 	rf.lastTicker = time.Now().UnixMilli()
+	index := len(rf.logEty)
 	rf.mu.Unlock()
 	var cond = sync.NewCond(&rf.mu)
 	n := len(rf.peers)
@@ -470,6 +477,21 @@ func (rf *Raft) sendHeartbeatOrEty(logEty []Entry, index int) {
 		if i == rf.me {
 			continue
 		}
+		rf.mu.Lock()
+		args := AppendEntriesArgs{
+			LeaderTerm:   rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: index - 1,
+			Log:          rf.logEty[rf.nextIndex[i]-1:],
+			LeaderCommit: rf.commitIndex,
+		}
+		if index > 1 {
+			args.PrevLogTerm = rf.logEty[index-2].Term
+		}
+		if rf.nextIndex[i] > len(rf.logEty) {
+			args.Log = nil
+		}
+		rf.mu.Unlock()
 		reply := AppendEntriesReply{}
 		go func(x int) {
 			rf.sendAppendEntries(x, &args, &reply)
@@ -483,14 +505,10 @@ func (rf *Raft) sendHeartbeatOrEty(logEty []Entry, index int) {
 		//log.Println("detect", index, rf.appendSuccess)
 	}
 	//log.Println("loglenth", index, rf.appendSuccess > n/2, rf.commitIndex < len(rf.logEty))
-	/*if logEty == nil {
-		log.Println("log nil")
-		return
-	}*/
 	if rf.appendSuccess > n/2 && rf.commitIndex < len(rf.logEty) && index != 0 {
-		rf.commitIndex = args.PrevLogIndex + len(logEty)
-		//log.Println("leader", rf.commitIndex)
+		rf.commitIndex = len(rf.logEty)
 		go rf.sendMsg()
+		//log.Println("leader", rf.commitIndex)
 	}
 }
 
