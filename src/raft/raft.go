@@ -227,11 +227,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.logEty = append(rf.logEty, args.Log...)
 		}
 		//log.Println("flw", len(rf.logEty))
-		if rf.commitIndex < args.LeaderCommit {
-			if args.LeaderCommit < len(rf.logEty) {
+		if rf.commitIndex < args.LeaderCommit || rf.lastApplied < rf.commitIndex {
+			/*if args.LeaderCommit < len(rf.logEty) {
 				rf.commitIndex = args.LeaderCommit
 			} else {
 				rf.commitIndex = len(rf.logEty)
+			}*/
+			if rf.commitIndex < args.LeaderCommit {
+				rf.commitIndex = min(args.LeaderCommit, len(rf.logEty))
 			}
 			//log.Println("flw", rf.me, rf.commitIndex)
 			go rf.sendMsg()
@@ -240,6 +243,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// Your code here (2A, 2B).
+}
+
+func min(x, y int) int {
+	if x < y {
+		return x
+	} else {
+		return y
+	}
 }
 
 //
@@ -337,6 +348,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		ety := Entry{Command: command, Term: rf.currentTerm}
 		rf.logEty = append(rf.logEty, ety)
 		index = len(rf.logEty)
+		go rf.sendHeartbeatOrEty()
 		//log.Println("isStart!", rf.me)
 	}
 	// Your code here (2B).
@@ -415,6 +427,9 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock()
 			}
 		} else {
+			rf.mu.Unlock()
+			time.Sleep(time.Duration(TICKER) * time.Millisecond)
+			rf.mu.Lock()
 			if time.Now().UnixMilli()-rf.lastTicker > TICKER {
 				//log.Println("leader,term", rf.me, rf.currentTerm, len(rf.logEty))
 				rf.mu.Unlock()
@@ -505,8 +520,10 @@ func (rf *Raft) sendHeartbeatOrEty() {
 		//log.Println("detect", index, rf.appendSuccess)
 	}
 	//log.Println("loglenth", index, rf.appendSuccess > n/2, rf.commitIndex < len(rf.logEty))
-	if rf.appendSuccess > n/2 && rf.commitIndex < len(rf.logEty) && index != 0 {
-		rf.commitIndex = len(rf.logEty)
+	if rf.appendSuccess > n/2 && rf.commitIndex < len(rf.logEty) && index != 0 || rf.lastApplied < rf.commitIndex {
+		if rf.appendSuccess > n/2 && rf.commitIndex < len(rf.logEty) && index != 0 {
+			rf.commitIndex = len(rf.logEty)
+		}
 		go rf.sendMsg()
 		//log.Println("leader", rf.commitIndex)
 	}
