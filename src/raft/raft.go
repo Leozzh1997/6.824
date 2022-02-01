@@ -72,18 +72,19 @@ type Raft struct {
 	applyChan chan ApplyMsg
 	//heartbeatTimer chan bool
 	//electTimer     chan bool
-	persister     *Persister // Object to hold this peer's persisted state
-	me            int        // this peer's index into peers[]
-	voteFor       int
-	dead          int32 // set by Kill()
-	status        int   //0,1,2:follow,candidate,leader
-	currentTerm   int
-	logEty        []Entry
-	commitIndex   int
-	lastApplied   int
-	lastTicker    int64
-	selectTimeOut int64
+	persister   *Persister // Object to hold this peer's persisted state
+	me          int        // this peer's index into peers[]
+	voteFor     int
+	dead        int32 // set by Kill()
+	status      int   //0,1,2:follow,candidate,leader
+	currentTerm int
+	logEty      []Entry
+	commitIndex int
+	lastApplied int
+	lastTicker  int64
+	//selectTimeOut int64
 	//for leader
+	logInfo    []int
 	nextIndex  []int
 	matchIndex []int
 
@@ -194,6 +195,7 @@ type AppendEntriesArgs struct {
 	LastLogIndex int
 	LastLogTerm  int
 	Log          []Entry
+	LogInfo      []int
 }
 
 type AppendEntriesReply struct {
@@ -251,21 +253,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	lastindex := len(rf.logEty) - 1
 	lastTerm := rf.logEty[lastindex].Term
 	conflixIndex := 0
-	if lastTerm < args.LastLogTerm || lastTerm == args.LastLogTerm && lastindex < args.LastLogIndex ||
-		args.LastLogTerm == lastTerm && args.LastLogIndex == lastindex && args.LeaderTerm >= rf.currentTerm {
-
+	if (lastTerm < args.LastLogTerm) || (lastTerm == args.LastLogTerm && lastindex < args.LastLogIndex) ||
+		(args.LastLogTerm == lastTerm && args.LastLogIndex == lastindex && args.LeaderTerm >= rf.currentTerm) {
+		//log.Println("cond true")
 		rf.lastTicker = time.Now().UnixMilli()
 		rf.currentTerm = args.LeaderTerm
 		rf.convertTo(FOLLOER)
 		//同步log，看是否能success
-		reply.Success = true
+		conflixIndex = 1
+		for conflixIndex < len(rf.logEty) {
+			if rf.logEty[conflixIndex].Term != args.LogInfo[conflixIndex] {
+				break
+			}
+			conflixIndex++
+		}
+		if conflixIndex > args.PrevLogIndex {
+			reply.Success = true
+			rf.logEty = append(rf.logEty[:args.PrevLogIndex+1], args.Log...)
+		} else {
+			reply.Success = false
+		}
 		//更新follower的commitIndex
-		if rf.commitIndex < args.LeaderCommit || rf.lastApplied < rf.commitIndex {
-			/*if args.LeaderCommit < len(rf.logEty) {
-				rf.commitIndex = args.LeaderCommit
-			} else {
-				rf.commitIndex = len(rf.logEty)
-			}*/
+		if (rf.commitIndex < args.LeaderCommit || rf.lastApplied < rf.commitIndex) && reply.Success {
 			if rf.commitIndex < args.LeaderCommit {
 				rf.commitIndex = min(args.LeaderCommit, len(rf.logEty))
 			}
@@ -378,6 +387,10 @@ func (rf *Raft) startNewElection() {
 			rf.nextIndex[i] = len(rf.logEty)
 			rf.matchIndex[i] = 0
 		}
+		rf.logInfo = make([]int, len(rf.logEty))
+		for i := 0; i < len(rf.logInfo); i++ {
+			rf.logInfo[i] = rf.logEty[i].Term
+		}
 		DPrintf("server %d is now leader ,term is %d", rf.me, rf.currentTerm)
 		go rf.sendHeartbeatOrEty()
 	}
@@ -407,6 +420,7 @@ func (rf *Raft) sendHeartbeatOrEty() {
 			LeaderCommit: rf.commitIndex,
 			LastLogIndex: len(rf.logEty) - 1,
 			LastLogTerm:  rf.logEty[len(rf.logEty)-1].Term,
+			LogInfo:      rf.logInfo,
 		}
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{}
@@ -422,7 +436,7 @@ func (rf *Raft) sendHeartbeatOrEty() {
 				} else {
 					rf.nextIndex[x] = reply.CoflixIndex
 				}
-				if reply.NodeTerm > rf.currentTerm {
+				if reply.NodeTerm > rf.currentTerm || reply.CoflixIndex == 0 {
 					rf.convertTo(FOLLOER)
 				}
 				//DPrintf("append ok %d -> %d", rf.me, x)
@@ -465,7 +479,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.status == LEADER {
 		ety := Entry{Command: command, Term: rf.currentTerm}
 		rf.logEty = append(rf.logEty, ety)
-		index = len(rf.logEty)
+		index = len(rf.logEty) - 1
+		rf.matchIndex[rf.me] = index
+		rf.logInfo = append(rf.logInfo, rf.currentTerm)
 		//go rf.sendHeartbeatOrEty()
 		//log.Println("isStart!", rf.me)
 	}
@@ -474,10 +490,27 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, rf.currentTerm, rf.status == LEADER
 }
 func (rf *Raft) checkCommit() {
-
+	rf.mu.Lock()
+	n := len(rf.peers)
+	for N := len(rf.logEty) - 1; N > rf.commitIndex; N-- {
+		k := 0
+		for i := 0; i < n; i++ {
+			if rf.matchIndex[i] >= N {
+				k++
+			}
+		}
+		if k > n/2 && rf.logEty[N].Term == rf.currentTerm {
+			rf.commitIndex = N
+			rf.mu.Unlock()
+			rf.sendMsg()
+			return
+		}
+	}
+	rf.mu.Unlock()
 }
+
 func (rf *Raft) sendMsg() {
-	//log.Println("id,index", rf.me, rf.commitIndex)
+	//log.Println("id,index,log", rf.me, rf.commitIndex, rf.logEty)
 	rf.mu.Lock()
 	applied := rf.lastApplied + 1
 	commit := rf.commitIndex
@@ -486,7 +519,7 @@ func (rf *Raft) sendMsg() {
 		rf.mu.Lock()
 		msg := ApplyMsg{
 			CommandValid: true,
-			Command:      rf.logEty[applied-1].Command,
+			Command:      rf.logEty[applied].Command,
 			CommandIndex: applied,
 		}
 		rf.mu.Unlock()
