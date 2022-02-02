@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -119,6 +121,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.logEty)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+
 }
 
 //
@@ -141,6 +151,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var logEty []Entry
+	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil ||
+		d.Decode(&logEty) != nil {
+		DPrintf("decode error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.voteFor = voteFor
+		rf.logEty = logEty
+	}
+
 }
 
 //
@@ -219,7 +243,7 @@ func (rf *Raft) convertTo(status int) {
 
 func resetElectTimeOut() int64 {
 	rand.Seed(time.Now().UnixNano())
-	return int64(rand.Intn(500) + 500)
+	return int64(rand.Intn(500) + 200)
 }
 
 //
@@ -238,6 +262,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.voteFor = args.CandidateId
 			rf.lastTicker = time.Now().UnixMilli()
 			rf.currentTerm = args.CandidateTerm
+			rf.persist()
 		}
 	}
 	reply.NodeTerm = rf.currentTerm
@@ -273,6 +298,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			reply.Success = false
 		}
+		rf.persist()
 		//更新follower的commitIndex
 		if (rf.commitIndex < args.LeaderCommit || rf.lastApplied < rf.commitIndex) && reply.Success {
 			if rf.commitIndex < args.LeaderCommit {
@@ -337,6 +363,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) startNewElection() {
 	rf.mu.Lock()
 	rf.convertTo(CADIDATE)
+	rf.persist()
 	voteMe := 1
 	voteFinish := 0
 	lastIndex := len(rf.logEty) - 1
@@ -365,6 +392,7 @@ func (rf *Raft) startNewElection() {
 				}
 				if reply.NodeTerm > rf.currentTerm {
 					rf.convertTo(FOLLOER)
+					rf.persist()
 				}
 			} else {
 				//DPrintf("requestRPC error %d -> %d", rf.me, x)
@@ -383,6 +411,7 @@ func (rf *Raft) startNewElection() {
 	}
 	if voteMe > n/2 {
 		rf.convertTo(LEADER)
+		rf.persist()
 		for i := 0; i < n; i++ {
 			rf.nextIndex[i] = len(rf.logEty)
 			rf.matchIndex[i] = 0
@@ -395,6 +424,7 @@ func (rf *Raft) startNewElection() {
 		go rf.sendHeartbeatOrEty()
 	}
 	rf.voteFor = -1
+	rf.persist()
 }
 
 func (rf *Raft) sendHeartbeatOrEty() {
@@ -438,6 +468,7 @@ func (rf *Raft) sendHeartbeatOrEty() {
 				}
 				if reply.NodeTerm > rf.currentTerm || reply.CoflixIndex == 0 {
 					rf.convertTo(FOLLOER)
+					rf.persist()
 				}
 				//DPrintf("append ok %d -> %d", rf.me, x)
 			} else {
@@ -482,6 +513,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.logEty) - 1
 		rf.matchIndex[rf.me] = index
 		rf.logInfo = append(rf.logInfo, rf.currentTerm)
+		rf.persist()
 		//go rf.sendHeartbeatOrEty()
 		//log.Println("isStart!", rf.me)
 	}
