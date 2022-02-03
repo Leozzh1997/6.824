@@ -613,7 +613,7 @@ func (rf *Raft) killed() bool {
 
 	}
 }*/
-
+//一定要用协程发起elect和heartbeat
 func (rf *Raft) leaderTimer() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -622,9 +622,9 @@ func (rf *Raft) leaderTimer() {
 			if internal > TICKER {
 				//DPrintf("server %d send heartbeat", rf.me)
 				rf.lastTicker = time.Now().UnixMilli()
-				rf.mu.Unlock()
-				rf.sendHeartbeatOrEty()
-				rf.mu.Lock()
+				//rf.mu.Unlock()
+				go rf.sendHeartbeatOrEty()
+				//rf.mu.Lock()
 				//rf.heartbeatTimer <- true
 			}
 		}
@@ -642,10 +642,10 @@ func (rf *Raft) flwOrCandidateTimer() {
 			internal := time.Now().UnixMilli() - rf.lastTicker
 			if internal > timeout {
 				//DPrintf("server %d start election term:%d", rf.me, rf.currentTerm)
-				rf.mu.Unlock()
+				//rf.mu.Unlock()
 				//rf.electTimer <- true
-				rf.startNewElection()
-				rf.mu.Lock()
+				go rf.startNewElection()
+				//rf.mu.Lock()
 			}
 		}
 		rf.mu.Unlock()
