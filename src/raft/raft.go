@@ -282,7 +282,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	reply.Success = false
 	reply.NodeTerm = rf.currentTerm
-	conflixIndex := 0
+	conflixIndex := 1
+	reply.ConflixIndex = 0
 	if rf.currentTerm > args.LeaderTerm {
 		return
 	}
@@ -292,14 +293,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 	rf.lastTicker = time.Now().UnixMilli()
-
-	/*conflixIndex := 0
-	for conflixIndex < len(rf.logEty) && conflixIndex < len(args.LogInfo) {
-		if rf.logEty[conflixIndex].Term != args.LogInfo[conflixIndex] {
-			break
-		}
-		conflixIndex++
-	}*/
 
 	if len(rf.logEty) <= args.PrevLogIndex {
 		reply.ConflixIndex = len(rf.logEty)
@@ -325,6 +318,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.commitIndex > rf.lastApplied {
 		go rf.sendMsg()
 	}
+	reply.ConflixIndex = 1
 	reply.Success = true
 	// Your code here (2A, 2B).
 }
@@ -452,26 +446,25 @@ func (rf *Raft) sendHeartbeatOrEty() {
 		if i == rf.me {
 			continue
 		}
-		rf.mu.Lock()
-		index := rf.nextIndex[i]
-		args := AppendEntriesArgs{
-			LeaderTerm:   rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: index - 1,
-			PrevLogTerm:  rf.logEty[index-1].Term,
-			Log:          rf.logEty[index:],
-			LeaderCommit: rf.commitIndex,
-			LastLogIndex: len(rf.logEty) - 1,
-			LastLogTerm:  rf.logEty[len(rf.logEty)-1].Term,
-		}
-		rf.mu.Unlock()
-		reply := AppendEntriesReply{}
 		go func(x int) {
+			rf.mu.Lock()
+			args := AppendEntriesArgs{
+				LeaderTerm:   rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: rf.nextIndex[x] - 1,
+				PrevLogTerm:  rf.logEty[rf.nextIndex[x]-1].Term,
+				Log:          rf.logEty[rf.nextIndex[x]:],
+				LeaderCommit: rf.commitIndex,
+				LastLogIndex: len(rf.logEty) - 1,
+				LastLogTerm:  rf.logEty[len(rf.logEty)-1].Term,
+			}
+			rf.mu.Unlock()
+			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(x, &args, &reply)
 			rf.mu.Lock()
 			appendReply++
 			if ok {
-				if reply.NodeTerm > rf.currentTerm {
+				if reply.NodeTerm > rf.currentTerm || reply.ConflixIndex == 0 {
 					DPrintf("term %d -> term %d id %d leader %d", rf.currentTerm, reply.NodeTerm, x, rf.me)
 					rf.currentTerm = reply.NodeTerm
 					rf.convertTo(FOLLOER)
