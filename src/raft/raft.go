@@ -74,6 +74,7 @@ type Raft struct {
 	peers          []*labrpc.ClientEnd // RPC end points of all peers
 	applyChan      chan ApplyMsg
 	installSuccess chan bool
+	leaderId       int
 	//heartbeatTimer chan bool
 	//electTimer     chan bool
 	persister   *Persister // Object to hold this peer's persisted state
@@ -159,6 +160,7 @@ func (rf *Raft) persist() {
 	e2.Encode(rf.lastIncludedTerm)
 	e2.Encode(rf.snapShot)
 	snapShot := w2.Bytes()
+	snapShot = nil //for lab3A
 	rf.persister.SaveStateAndSnapshot(state, snapShot)
 
 }
@@ -372,6 +374,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.currentTerm < args.LeaderTerm {
 		rf.currentTerm = args.LeaderTerm
 		rf.convertTo(FOLLOER)
+		rf.leaderId = args.LeaderId
 		rf.persist()
 	}
 	rf.lastTicker = time.Now().UnixMilli()
@@ -848,6 +851,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState(), 0)
 	rf.readPersist(persister.ReadSnapshot(), 1)
 	rf.lastApplied = rf.lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
 
 	// start ticker goroutine to start elections
 	//go rf.ticker()

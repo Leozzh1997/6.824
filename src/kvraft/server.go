@@ -1,15 +1,17 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -18,8 +20,10 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
+	Opcode string
+	Key    string
+	Value  string
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
@@ -31,19 +35,68 @@ type KVServer struct {
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
+	db      map[string]string
 
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, ok := kv.rf.GetState()
+	if !ok {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	v, ok := kv.db[args.Key]
+	if !ok {
+		reply.Err = ErrNoKey
+		reply.Value = ""
+	} else {
+		reply.Err = OK
+		reply.Value = v
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{
+		Opcode: args.Op,
+		Key:    args.Key,
+		Value:  args.Value,
+	}
+	kv.mu.Lock()
+	index, _, ok := kv.rf.Start(op)
+
+	//DPrintf("find leader? %v", ok)
+	if !ok {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+	for msg := range kv.applyCh {
+		kv.mu.Lock()
+		if msg.CommandValid && msg.CommandIndex == index {
+			if args.Op == "Put" {
+				kv.db[args.Key] = args.Value
+			} else {
+				v, ok := kv.db[args.Key]
+				if !ok {
+					kv.db[args.Key] = args.Value
+				} else {
+					kv.db[args.Key] = v + args.Value
+				}
+			}
+			kv.mu.Unlock()
+			break
+		}
+		kv.mu.Unlock()
+	}
+	reply.Err = OK
 }
 
 //
@@ -65,6 +118,12 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) ticker() {
+	for !kv.killed() {
+		time.Sleep(time.Millisecond * 50)
+	}
 }
 
 //
@@ -89,12 +148,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
+	kv.db = make(map[string]string)
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	go kv.ticker()
 	// You may need initialization code here.
 
 	return kv
