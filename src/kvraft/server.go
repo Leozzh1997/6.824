@@ -11,7 +11,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -21,9 +21,11 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	Opcode string
-	Key    string
-	Value  string
+	Opcode   string
+	Key      string
+	Value    string
+	ClientId int64
+	ReqId    int
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
@@ -36,67 +38,96 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 	db      map[string]string
+	opCh    map[int64]chan Op
+	reqMap  map[int64]int
 
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
 }
 
+func (op *Op) equal(op2 Op) bool {
+	return op.ClientId == op2.ClientId && op.ReqId == op2.ReqId
+}
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	_, ok := kv.rf.GetState()
 	if !ok {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	v, ok := kv.db[args.Key]
+	op := Op{
+		Opcode:   "Get",
+		Key:      args.Key,
+		ReqId:    args.ReqId,
+		ClientId: args.ClientId,
+	}
+	kv.rf.Start(op)
+	kv.mu.Lock()
+	ch, ok := kv.opCh[args.ClientId]
 	if !ok {
-		reply.Err = ErrNoKey
-		reply.Value = ""
+		kv.opCh[args.ClientId] = make(chan Op)
+	}
+	ch = kv.opCh[args.ClientId]
+	kv.mu.Unlock()
+	newOp := Op{}
+	select {
+	case newOp = <-ch:
+		DPrintf("get op %v", newOp)
+	case <-time.After(time.Duration(300) * time.Millisecond):
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if newOp.equal(op) {
+		v, ok := kv.db[newOp.Key]
+		if !ok {
+			reply.Err = ErrNoKey
+			reply.Value = ""
+		} else {
+			reply.Err = OK
+			reply.Value = v
+		}
 	} else {
-		reply.Err = OK
-		reply.Value = v
+		reply.Err = ErrWrongLeader
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	op := Op{
-		Opcode: args.Op,
-		Key:    args.Key,
-		Value:  args.Value,
+		Opcode:   args.Op,
+		Key:      args.Key,
+		Value:    args.Value,
+		ReqId:    args.ReqId,
+		ClientId: args.ClientId,
 	}
-	kv.mu.Lock()
-	index, _, ok := kv.rf.Start(op)
-
-	//DPrintf("find leader? %v", ok)
+	_, ok := kv.rf.GetState()
 	if !ok {
 		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
 		return
 	}
-	kv.mu.Unlock()
-	for msg := range kv.applyCh {
-		kv.mu.Lock()
-		if msg.CommandValid && msg.CommandIndex == index {
-			if args.Op == "Put" {
-				kv.db[args.Key] = args.Value
-			} else {
-				v, ok := kv.db[args.Key]
-				if !ok {
-					kv.db[args.Key] = args.Value
-				} else {
-					kv.db[args.Key] = v + args.Value
-				}
-			}
-			kv.mu.Unlock()
-			break
-		}
-		kv.mu.Unlock()
+
+	//DPrintf("find leader? %v", ok)
+	kv.rf.Start(op)
+	kv.mu.Lock()
+	ch, ok := kv.opCh[args.ClientId]
+	if !ok {
+		kv.opCh[args.ClientId] = make(chan Op)
 	}
-	reply.Err = OK
+	ch = kv.opCh[args.ClientId]
+	kv.mu.Unlock()
+	newOp := Op{}
+	select {
+	case newOp = <-ch:
+	case <-time.After(time.Duration(300) * time.Millisecond):
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if newOp.equal(op) {
+		reply.Err = OK
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 //
@@ -121,8 +152,30 @@ func (kv *KVServer) killed() bool {
 }
 
 func (kv *KVServer) ticker() {
-	for !kv.killed() {
-		time.Sleep(time.Millisecond * 50)
+	for msg := range kv.applyCh {
+		if kv.killed() {
+			return
+		}
+		DPrintf("msg info %v", msg)
+		if msg.CommandValid {
+			kv.mu.Lock()
+			op := msg.Command.(Op)
+			preReqId, ok := kv.reqMap[op.ClientId]
+			if !ok || preReqId < op.ReqId {
+				kv.opCh[op.ClientId] <- op
+				kv.reqMap[op.ClientId] = op.ReqId
+				switch op.Opcode {
+				case "Put":
+					kv.db[op.Key] = op.Value
+				case "Append":
+					kv.db[op.Key] += op.Value
+				}
+			}
+			kv.mu.Unlock()
+		} else {
+
+		}
+
 	}
 }
 
@@ -149,6 +202,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.db = make(map[string]string)
+	kv.reqMap = make(map[int64]int)
+	kv.opCh = make(map[int64]chan Op)
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)

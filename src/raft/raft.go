@@ -89,6 +89,7 @@ type Raft struct {
 	lastTicker  int64
 	//selectTimeOut int64
 	//for leader
+	lastIndex  int //for Start 表面是否有新的command，若有，则AE
 	nextIndex  []int
 	matchIndex []int
 
@@ -552,6 +553,7 @@ func (rf *Raft) startNewElection() {
 		rf.convertTo(LEADER)
 		rf.persist()
 		index, _ := rf.getLast()
+		rf.lastIndex = index
 		for i := 0; i < n; i++ {
 			rf.nextIndex[i] = index + 1
 			rf.matchIndex[i] = 0
@@ -777,9 +779,10 @@ func (rf *Raft) leaderTimer() {
 		rf.mu.Lock()
 		if rf.status == LEADER {
 			internal := time.Now().UnixMilli() - rf.lastTicker
-			if internal > TICKER {
+			lastIndex, _ := rf.getLast()
+			if internal > TICKER || rf.lastIndex < lastIndex {
 				//DPrintf("server %d send heartbeat", rf.me)
-				rf.lastTicker = time.Now().UnixMilli()
+				rf.lastIndex = lastIndex
 				//rf.mu.Unlock()
 				go rf.sendHeartbeatOrEty()
 				//rf.mu.Lock()
@@ -787,7 +790,7 @@ func (rf *Raft) leaderTimer() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Millisecond * 20)
+		time.Sleep(time.Millisecond * 25) //lab2C last two test case will sometimes fail,just 25 -> 35or40 maybe too much rpc?
 	}
 }
 
@@ -852,6 +855,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadSnapshot(), 1)
 	rf.lastApplied = rf.lastIncludedIndex
 	rf.commitIndex = rf.lastIncludedIndex
+	rf.lastIndex, _ = rf.getLast()
 
 	// start ticker goroutine to start elections
 	//go rf.ticker()
