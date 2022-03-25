@@ -46,6 +46,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -73,6 +74,7 @@ type Raft struct {
 	mu             sync.Mutex          // Lock to protect shared access to this peer's state
 	peers          []*labrpc.ClientEnd // RPC end points of all peers
 	applyChan      chan ApplyMsg
+	replicatorCond []*sync.Cond
 	installSuccess chan bool
 	leaderId       int
 	//heartbeatTimer chan bool
@@ -404,9 +406,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		index, _ := rf.getLast()
 		rf.commitIndex = min(args.LeaderCommit, index)
 	}
-	if rf.commitIndex > rf.lastApplied {
+	/*if rf.commitIndex > rf.lastApplied {
 		go rf.sendMsg(nil)
-	}
+	}*/
 	reply.ConflixIndex = 1
 	reply.Success = true
 	// Your code here (2A, 2B).
@@ -559,95 +561,63 @@ func (rf *Raft) startNewElection() {
 			rf.matchIndex[i] = 0
 		}
 		//DPrintf("server %d is now leader ,term is %d lastLog is %v index is %d",
-		//rf.me, rf.currentTerm, rf.logEty[len(rf.logEty)-1], len(rf.logEty))
+		//	rf.me, rf.currentTerm, rf.logEty[len(rf.logEty)-1], len(rf.logEty))
 		rf.mu.Unlock()
-		rf.sendHeartbeatOrEty()
+		rf.broadcastHeartbeat(true)
 		rf.mu.Lock()
 	}
 }
 
-func (rf *Raft) sendHeartbeatOrEty() {
+func (rf *Raft) sendHeartbeatOrEty(x int) {
 	rf.mu.Lock()
-	appendReply := 0
-	appendSuccess := 1
-	rf.lastTicker = time.Now().UnixMilli()
-	rf.mu.Unlock()
-	var cond = sync.NewCond(&rf.mu)
-	n := len(rf.peers)
-	for i := 0; i < n; i++ {
-		if i == rf.me {
-			continue
+	if rf.nextIndex[x] < rf.lastIncludedIndex {
+		installargs := InstallsnapshotArgs{
+			LeaderTerm:        rf.currentTerm,
+			LeaderId:          rf.me,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm:  rf.lastIncludedTerm,
+			Snapshot:          rf.snapShot,
 		}
-		rf.mu.Lock()
-		if rf.nextIndex[i] < rf.lastIncludedIndex {
-			installargs := InstallsnapshotArgs{
-				LeaderTerm:        rf.currentTerm,
-				LeaderId:          rf.me,
-				LastIncludedIndex: rf.lastIncludedIndex,
-				LastIncludedTerm:  rf.lastIncludedTerm,
-				Snapshot:          rf.snapShot,
-			}
-			rf.mu.Unlock()
-			installreply := InstallsnapshotReply{}
-			go func(x int) {
-				rf.sendInstallSnapshot(x, &installargs, &installreply)
-			}(i)
-			appendReply++
-			continue
+		rf.mu.Unlock()
+		installreply := InstallsnapshotReply{}
+		rf.sendInstallSnapshot(x, &installargs, &installreply)
+	} else {
+		pos := rf.getPos(rf.nextIndex[x] - 1)
+		args := AppendEntriesArgs{
+			LeaderTerm:   rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[x] - 1,
+			LeaderCommit: rf.commitIndex,
+			Log:          rf.logEty[pos+1:],
+		}
+		if pos >= 0 {
+			args.PrevLogTerm = rf.logEty[pos].Term
 		} else {
-			rf.mu.Unlock()
-			go func(x int) {
-				rf.mu.Lock()
-				pos := rf.getPos(rf.nextIndex[x] - 1)
-				args := AppendEntriesArgs{
-					LeaderTerm:   rf.currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: rf.nextIndex[x] - 1,
-					LeaderCommit: rf.commitIndex,
-					Log:          rf.logEty[pos+1:],
-				}
-				if pos >= 0 {
-					args.PrevLogTerm = rf.logEty[pos].Term
-				} else {
-					args.PrevLogTerm = rf.lastIncludedTerm
-				}
-				rf.mu.Unlock()
-				reply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(x, &args, &reply)
-				rf.mu.Lock()
-				appendReply++
-				if ok {
-					if reply.NodeTerm > rf.currentTerm || reply.ConflixIndex == 0 {
-						DPrintf("term %d -> term %d id %d leader %d", rf.currentTerm, reply.NodeTerm, x, rf.me)
-						rf.currentTerm = reply.NodeTerm
-						rf.convertTo(FOLLOER)
-						rf.persist()
-					} else {
-						if reply.Success {
-							appendSuccess++
-							rf.nextIndex[x] = args.PrevLogIndex + len(args.Log) + 1
-							rf.matchIndex[x] = rf.nextIndex[x] - 1
-						} else {
-							rf.nextIndex[x] = reply.ConflixIndex
-						}
-					}
-					//DPrintf("append ok %d -> %d", rf.me, x)
-				} else {
-					//DPrintf("appendRPC call failed %d -> %d", rf.me, x)
-				}
-				rf.mu.Unlock()
-				cond.Broadcast()
-			}(i)
+			args.PrevLogTerm = rf.lastIncludedTerm
 		}
-	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	for appendSuccess <= n/2 && appendReply != n-1 && rf.status == LEADER {
-		cond.Wait()
-	}
-	//DPrintf("server %d append ok,success num %d", rf.me, appendSuccess)
-	if appendSuccess > n/2 && rf.status == LEADER {
-		go rf.checkCommit()
+		rf.mu.Unlock()
+		reply := AppendEntriesReply{}
+		ok := rf.sendAppendEntries(x, &args, &reply)
+		rf.mu.Lock()
+		if ok {
+			if reply.NodeTerm > rf.currentTerm || reply.ConflixIndex == 0 {
+				DPrintf("status change: term %d -> term %d id %d leader %d", rf.currentTerm, reply.NodeTerm, x, rf.me)
+				rf.currentTerm = reply.NodeTerm
+				rf.convertTo(FOLLOER)
+				rf.persist()
+			} else {
+				if reply.Success {
+					rf.nextIndex[x] = args.PrevLogIndex + len(args.Log) + 1
+					rf.matchIndex[x] = rf.nextIndex[x] - 1
+				} else {
+					rf.nextIndex[x] = reply.ConflixIndex
+				}
+			}
+			// DPrintf("append ok %d -> %d", rf.me, x)
+		} else {
+			//DPrintf("appendRPC call failed %d -> %d", rf.me, x)
+		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -676,8 +646,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logEty = append(rf.logEty, ety)
 		rf.matchIndex[rf.me] = index
 		rf.persist()
-		//go rf.sendHeartbeatOrEty()
-		//log.Println("isStart!", rf.me)
+		rf.mu.Unlock()
+		rf.broadcastHeartbeat(false)
+		rf.mu.Lock()
+		// DPrintf("%d recive cmd\n", rf.me)
 	}
 	// Your code here (2B).
 
@@ -715,25 +687,25 @@ func (rf *Raft) sendMsg(msg *ApplyMsg) {
 	applied := rf.lastApplied + 1
 	commit := rf.commitIndex
 	DPrintf("server %d,commit %d,applied %v", rf.me, rf.commitIndex, applied)
-	rf.mu.Unlock()
 	for ; applied <= commit; applied++ {
-		rf.mu.Lock()
 		i := rf.getPos(applied)
 		if i < 0 {
 			rf.mu.Unlock()
-			break
+			return
 		}
 		msg := ApplyMsg{
 			CommandValid: true,
 			Command:      rf.logEty[i].Command,
 			CommandIndex: applied,
+			CommandTerm:  rf.currentTerm,
 		}
 		rf.mu.Unlock()
 		rf.applyChan <- msg
 		rf.mu.Lock()
-		rf.lastApplied++
-		rf.mu.Unlock()
+		rf.lastApplied = applied
 	}
+	rf.mu.Unlock()
+	// DPrintf("apply finish lastapply %d", rf.lastApplied)
 }
 
 //
@@ -778,19 +750,19 @@ func (rf *Raft) leaderTimer() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.status == LEADER {
+			rf.mu.Unlock()
+			rf.checkCommit()
+			rf.mu.Lock()
 			internal := time.Now().UnixMilli() - rf.lastTicker
-			lastIndex, _ := rf.getLast()
-			if internal > TICKER || rf.lastIndex < lastIndex {
+			if internal > TICKER {
 				//DPrintf("server %d send heartbeat", rf.me)
-				rf.lastIndex = lastIndex
-				//rf.mu.Unlock()
-				go rf.sendHeartbeatOrEty()
-				//rf.mu.Lock()
-				//rf.heartbeatTimer <- true
+				rf.mu.Unlock()
+				rf.broadcastHeartbeat(true)
+				rf.mu.Lock()
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Millisecond * 25) //lab2C last two test case will sometimes fail,just 25 -> 35or40 maybe too much rpc?
+		time.Sleep(time.Millisecond * 20) //lab2C last two test case will sometimes fail,just 25 -> 35or40 maybe too much rpc?
 	}
 }
 
@@ -807,10 +779,52 @@ func (rf *Raft) flwOrCandidateTimer() {
 				//rf.electTimer <- true
 				go rf.startNewElection()
 				//rf.mu.Lock()
+			} else {
+				if rf.lastApplied < rf.commitIndex {
+					rf.mu.Unlock()
+					rf.sendMsg(nil)
+					rf.mu.Lock()
+				}
 			}
 		}
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) broadcastHeartbeat(heartbeat bool) {
+	rf.mu.Lock()
+	rf.lastTicker = time.Now().UnixMilli()
+	rf.mu.Unlock()
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		if heartbeat {
+			go rf.sendHeartbeatOrEty(peer)
+		} else {
+			rf.replicatorCond[peer].Signal()
+		}
+	}
+}
+
+func (rf *Raft) replicator(peer int) {
+	rf.replicatorCond[peer].L.Lock()
+	defer rf.replicatorCond[peer].L.Unlock()
+	for !rf.killed() {
+		for !rf.needReplicate(peer) {
+			rf.replicatorCond[peer].Wait()
+			// DPrintf("%d awake\n", peer)
+		}
+		DPrintf("%d send aeRpc to %d", rf.me, peer)
+		rf.sendHeartbeatOrEty(peer)
+	}
+}
+
+func (rf *Raft) needReplicate(peer int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	lastIndex, _ := rf.getLast()
+	return rf.status == LEADER && rf.matchIndex[peer] < lastIndex
 }
 
 //
@@ -846,8 +860,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.installSuccess = make(chan bool)
 	rf.lastIncludedIndex = 0
 	rf.lastIncludedTerm = 0
-	//rf.electTimer = make(chan bool)
-	//rf.heartbeatTimer = make(chan bool)
+	rf.replicatorCond = make([]*sync.Cond, len(peers))
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
@@ -856,7 +869,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = rf.lastIncludedIndex
 	rf.commitIndex = rf.lastIncludedIndex
 	rf.lastIndex, _ = rf.getLast()
-
+	for peer := range peers {
+		if peer == me {
+			continue
+		}
+		rf.replicatorCond[peer] = sync.NewCond(&sync.Mutex{})
+		go rf.replicator(peer)
+	}
 	// start ticker goroutine to start elections
 	//go rf.ticker()
 	go rf.leaderTimer()

@@ -36,9 +36,10 @@ type KVServer struct {
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
+	killCh  chan bool
 	dead    int32 // set by Kill()
 	db      map[string]string
-	opCh    map[int64]chan Op
+	opCh    map[int]chan Op
 	reqMap  map[int64]int
 
 	maxraftstate int // snapshot if log grows this big
@@ -46,14 +47,11 @@ type KVServer struct {
 	// Your definitions here.
 }
 
-func (op *Op) equal(op2 Op) bool {
-	return op.ClientId == op2.ClientId && op.ReqId == op2.ReqId
-}
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	_, ok := kv.rf.GetState()
 	if !ok {
-		reply.Err = ErrWrongLeader
+		reply.Msg = ErrWrongLeader
 		return
 	}
 	op := Op{
@@ -62,33 +60,21 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ReqId:    args.ReqId,
 		ClientId: args.ClientId,
 	}
-	kv.rf.Start(op)
-	kv.mu.Lock()
-	ch, ok := kv.opCh[args.ClientId]
-	if !ok {
-		kv.opCh[args.ClientId] = make(chan Op)
-	}
-	ch = kv.opCh[args.ClientId]
-	kv.mu.Unlock()
-	newOp := Op{}
+	index, term, _ := kv.rf.Start(op)
+	ch := kv.getChan(index)
 	select {
-	case newOp = <-ch:
-		DPrintf("get op %v", newOp)
-	case <-time.After(time.Duration(300) * time.Millisecond):
-	}
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if newOp.equal(op) {
-		v, ok := kv.db[newOp.Key]
-		if !ok {
-			reply.Err = ErrNoKey
-			reply.Value = ""
+	case <-ch:
+		nowTerm, _ := kv.rf.GetState()
+		if nowTerm != term {
+			reply.Msg = ErrWrongLeader
 		} else {
-			reply.Err = OK
-			reply.Value = v
+			reply.Msg = OK
+			kv.mu.Lock()
+			reply.Value = kv.db[args.Key]
+			kv.mu.Unlock()
 		}
-	} else {
-		reply.Err = ErrWrongLeader
+	case <-time.After(time.Duration(300) * time.Millisecond):
+		reply.Msg = ErrWrongLeader
 	}
 }
 
@@ -103,31 +89,34 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	_, ok := kv.rf.GetState()
 	if !ok {
-		reply.Err = ErrWrongLeader
+		reply.Msg = ErrWrongLeader
 		return
 	}
-
-	//DPrintf("find leader? %v", ok)
-	kv.rf.Start(op)
-	kv.mu.Lock()
-	ch, ok := kv.opCh[args.ClientId]
-	if !ok {
-		kv.opCh[args.ClientId] = make(chan Op)
-	}
-	ch = kv.opCh[args.ClientId]
-	kv.mu.Unlock()
-	newOp := Op{}
+	index, term, _ := kv.rf.Start(op)
+	DPrintf("find leader? %v index:%d ,%v", kv.me, index, op)
+	ch := kv.getChan(index)
 	select {
-	case newOp = <-ch:
+	case <-ch:
+		Newterm, _ := kv.rf.GetState()
+		if Newterm != term {
+			reply.Msg = ErrWrongLeader
+		} else {
+			reply.Msg = OK
+		}
 	case <-time.After(time.Duration(300) * time.Millisecond):
+		reply.Msg = ErrWrongLeader
 	}
+}
+
+func (kv *KVServer) getChan(index int) chan Op {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if newOp.equal(op) {
-		reply.Err = OK
-	} else {
-		reply.Err = ErrWrongLeader
+	_, ok := kv.opCh[index]
+	if !ok {
+		kv.opCh[index] = make(chan Op)
 	}
+	DPrintf("chan is exist? %v", ok)
+	return kv.opCh[index]
 }
 
 //
@@ -148,34 +137,42 @@ func (kv *KVServer) Kill() {
 
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
+	kv.killCh <- true
 	return z == 1
 }
 
 func (kv *KVServer) ticker() {
-	for msg := range kv.applyCh {
-		if kv.killed() {
-			return
-		}
-		DPrintf("msg info %v", msg)
-		if msg.CommandValid {
-			kv.mu.Lock()
-			op := msg.Command.(Op)
-			preReqId, ok := kv.reqMap[op.ClientId]
-			if !ok || preReqId < op.ReqId {
-				kv.opCh[op.ClientId] <- op
-				kv.reqMap[op.ClientId] = op.ReqId
-				switch op.Opcode {
-				case "Put":
-					kv.db[op.Key] = op.Value
-				case "Append":
-					kv.db[op.Key] += op.Value
+	for {
+		select {
+		case msg := <-kv.applyCh:
+			//DPrintf("msg info %v", msg)
+			if msg.CommandValid {
+				kv.mu.Lock()
+				op := msg.Command.(Op)
+				preReqId, ok := kv.reqMap[op.ClientId]
+				if !ok || preReqId < op.ReqId {
+					kv.reqMap[op.ClientId] = op.ReqId
+					switch op.Opcode {
+					case "Put":
+						kv.db[op.Key] = op.Value
+					case "Append":
+						kv.db[op.Key] += op.Value
+					}
+				}
+				kv.mu.Unlock()
+				if term, isLeader := kv.rf.GetState(); isLeader && term == msg.CommandTerm {
+					DPrintf("op success leader server %d index %d %v", kv.me, msg.CommandIndex, op)
+					ch := kv.getChan(msg.CommandIndex)
+					select {
+					case ch <- op:
+					default:
+					}
+					DPrintf("send ok")
 				}
 			}
-			kv.mu.Unlock()
-		} else {
-
+		case <-kv.killCh:
+			return
 		}
-
 	}
 }
 
@@ -203,10 +200,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 	kv.db = make(map[string]string)
 	kv.reqMap = make(map[int64]int)
-	kv.opCh = make(map[int64]chan Op)
+	kv.opCh = make(map[int]chan Op)
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.killCh = make(chan bool)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	go kv.ticker()
