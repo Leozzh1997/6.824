@@ -74,6 +74,7 @@ type Raft struct {
 	mu             sync.Mutex          // Lock to protect shared access to this peer's state
 	peers          []*labrpc.ClientEnd // RPC end points of all peers
 	applyChan      chan ApplyMsg
+	applyCond      *sync.Cond
 	replicatorCond []*sync.Cond
 	installSuccess chan bool
 	leaderId       int
@@ -113,6 +114,12 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.status == LEADER
+}
+
+func (rf *Raft) GetStateSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.RaftStateSize()
 }
 
 //get lastIndex and lastTerm
@@ -163,7 +170,7 @@ func (rf *Raft) persist() {
 	e2.Encode(rf.lastIncludedTerm)
 	e2.Encode(rf.snapShot)
 	snapShot := w2.Bytes()
-	snapShot = nil //for lab3A
+	// snapShot = nil //for lab3A
 	rf.persister.SaveStateAndSnapshot(state, snapShot)
 
 }
@@ -234,7 +241,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.snapShot = snapshot
-	rf.logEty = rf.logEty[:0]
+	newLog := rf.logEty[:0]
+	rf.logEty = newLog
 	rf.commitIndex = lastIncludedIndex
 	rf.lastApplied = lastIncludedIndex
 	rf.persist()
@@ -251,14 +259,24 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.lastIncludedIndex >= index {
+		return
+	}
 	rf.snapShot = snapshot
 	rf.lastIncludedIndex = index
 	i := rf.getPos(index)
 	rf.lastIncludedTerm = rf.logEty[i].Term
-	rf.logEty = rf.logEty[i+1:]
+	newLog := rf.logEty[i+1:]
+	rf.logEty = newLog
 	rf.persist()
 	// Your code here (2D).
 
+}
+
+func (rf *Raft) GetSnapshot() []byte {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.snapShot
 }
 
 //
@@ -406,9 +424,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		index, _ := rf.getLast()
 		rf.commitIndex = min(args.LeaderCommit, index)
 	}
-	/*if rf.commitIndex > rf.lastApplied {
-		go rf.sendMsg(nil)
-	}*/
+	if rf.commitIndex > rf.lastApplied {
+		rf.applyCond.Signal()
+	}
 	reply.ConflixIndex = 1
 	reply.Success = true
 	// Your code here (2A, 2B).
@@ -442,7 +460,7 @@ func (rf *Raft) InstallSnapshot(args *InstallsnapshotArgs, reply *Installsnapsho
 		Snapshot:      args.Snapshot,
 	}
 	rf.mu.Unlock()
-	rf.sendMsg(&msg)
+	rf.applyChan <- msg
 	reply.Success = <-rf.installSuccess
 }
 
@@ -666,45 +684,45 @@ func (rf *Raft) checkCommit() {
 			}
 		}
 		j := rf.getPos(N)
-		if k > n/2 && rf.logEty[j].Term == rf.currentTerm {
+		if j >= 0 && k > n/2 && rf.logEty[j].Term == rf.currentTerm {
 			rf.commitIndex = N
 			rf.mu.Unlock()
-			rf.sendMsg(nil)
+			rf.applyCond.Signal()
 			return
 		}
 	}
 	rf.mu.Unlock()
 }
 
-func (rf *Raft) sendMsg(msg *ApplyMsg) {
+func (rf *Raft) sendMsg() {
 	//DPrintf("server %d,log %v commit %d", rf.me, rf.logEty, rf.commitIndex)
-
-	if msg != nil {
-		rf.applyChan <- *msg
-		return
-	}
-	rf.mu.Lock()
-	applied := rf.lastApplied + 1
-	commit := rf.commitIndex
-	DPrintf("server %d,commit %d,applied %v", rf.me, rf.commitIndex, applied)
-	for ; applied <= commit; applied++ {
-		i := rf.getPos(applied)
-		if i < 0 {
-			rf.mu.Unlock()
-			return
+	for !rf.killed() {
+		rf.mu.Lock()
+		for rf.lastApplied >= rf.commitIndex {
+			rf.applyCond.Wait()
 		}
-		msg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.logEty[i].Command,
-			CommandIndex: applied,
-			CommandTerm:  rf.currentTerm,
+		applied := rf.lastApplied + 1
+		commit := rf.commitIndex
+		DPrintf("server %d,commit %d,applied %v", rf.me, rf.commitIndex, applied)
+		for ; applied <= commit; applied++ {
+			i := rf.getPos(applied)
+			// bug need fix
+			if i < 0 {
+				continue
+			}
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logEty[i].Command,
+				CommandIndex: applied,
+				CommandTerm:  rf.currentTerm,
+			}
+			rf.mu.Unlock()
+			rf.applyChan <- msg
+			rf.mu.Lock()
+			rf.lastApplied = applied
 		}
 		rf.mu.Unlock()
-		rf.applyChan <- msg
-		rf.mu.Lock()
-		rf.lastApplied = applied
 	}
-	rf.mu.Unlock()
 	// DPrintf("apply finish lastapply %d", rf.lastApplied)
 }
 
@@ -745,7 +763,6 @@ func (rf *Raft) killed() bool {
 
 	}
 }*/
-//一定要用协程发起elect和heartbeat
 func (rf *Raft) leaderTimer() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -770,6 +787,7 @@ func (rf *Raft) flwOrCandidateTimer() {
 	for !rf.killed() {
 		timeout := resetElectTimeOut()
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
+		// log.Printf("server %d log size %v commit %v,applied %v", rf.me, rf.GetStateSize(), rf.commitIndex, rf.lastApplied)
 		rf.mu.Lock()
 		if rf.status != LEADER {
 			internal := time.Now().UnixMilli() - rf.lastTicker
@@ -779,12 +797,6 @@ func (rf *Raft) flwOrCandidateTimer() {
 				//rf.electTimer <- true
 				go rf.startNewElection()
 				//rf.mu.Lock()
-			} else {
-				if rf.lastApplied < rf.commitIndex {
-					rf.mu.Unlock()
-					rf.sendMsg(nil)
-					rf.mu.Lock()
-				}
 			}
 		}
 		rf.mu.Unlock()
@@ -861,6 +873,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastIncludedIndex = 0
 	rf.lastIncludedTerm = 0
 	rf.replicatorCond = make([]*sync.Cond, len(peers))
+	rf.applyCond = sync.NewCond(&rf.mu)
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
@@ -880,6 +893,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//go rf.ticker()
 	go rf.leaderTimer()
 	go rf.flwOrCandidateTimer()
+	go rf.sendMsg()
 
 	return rf
 }

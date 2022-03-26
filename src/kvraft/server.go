@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -115,7 +116,6 @@ func (kv *KVServer) getChan(index int) chan Op {
 	if !ok {
 		kv.opCh[index] = make(chan Op)
 	}
-	DPrintf("chan is exist? %v", ok)
 	return kv.opCh[index]
 }
 
@@ -147,32 +147,70 @@ func (kv *KVServer) ticker() {
 		case msg := <-kv.applyCh:
 			//DPrintf("msg info %v", msg)
 			if msg.CommandValid {
-				kv.mu.Lock()
-				op := msg.Command.(Op)
-				preReqId, ok := kv.reqMap[op.ClientId]
-				if !ok || preReqId < op.ReqId {
-					kv.reqMap[op.ClientId] = op.ReqId
-					switch op.Opcode {
-					case "Put":
-						kv.db[op.Key] = op.Value
-					case "Append":
-						kv.db[op.Key] += op.Value
-					}
-				}
-				kv.mu.Unlock()
-				if term, isLeader := kv.rf.GetState(); isLeader && term == msg.CommandTerm {
-					DPrintf("op success leader server %d index %d %v", kv.me, msg.CommandIndex, op)
-					ch := kv.getChan(msg.CommandIndex)
-					select {
-					case ch <- op:
-					default:
-					}
-					DPrintf("send ok")
-				}
+				kv.handleMsg(msg)
+			} else if msg.SnapshotValid {
+				kv.handleSnap(msg)
 			}
 		case <-kv.killCh:
 			return
 		}
+	}
+}
+
+func (kv *KVServer) handleMsg(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	op := msg.Command.(Op)
+	preReqId, ok := kv.reqMap[op.ClientId]
+	if !ok || preReqId < op.ReqId {
+		kv.reqMap[op.ClientId] = op.ReqId
+		switch op.Opcode {
+		case "Put":
+			kv.db[op.Key] = op.Value
+		case "Append":
+			kv.db[op.Key] += op.Value
+		}
+	}
+	kv.mu.Unlock()
+	if term, isLeader := kv.rf.GetState(); isLeader && term == msg.CommandTerm {
+		DPrintf("op success leader server %d index %d %v", kv.me, msg.CommandIndex, op)
+		ch := kv.getChan(msg.CommandIndex)
+		select {
+		case ch <- op:
+		default:
+		}
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	DPrintf("server:%d ,log size: %v, maxsize: %v", kv.me, kv.rf.GetStateSize(), kv.maxraftstate)
+	if kv.maxraftstate != -1 && kv.maxraftstate <= kv.rf.GetStateSize() {
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		e.Encode(kv.db)
+		e.Encode(kv.reqMap)
+		kv.rf.Snapshot(msg.CommandIndex, w.Bytes())
+	}
+}
+
+func (kv *KVServer) handleSnap(m raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.rf.CondInstallSnapshot(m.SnapshotTerm, m.SnapshotIndex, m.Snapshot) {
+		kv.resetDb(m.Snapshot)
+	}
+
+}
+
+func (kv *KVServer) resetDb(snapshot []byte) {
+	if len(snapshot) == 0 || snapshot == nil {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if err := d.Decode(&kv.db); err != nil {
+		log.Fatal(err)
+	}
+	if d.Decode(&kv.reqMap) != nil {
+		log.Fatal("req decode err")
 	}
 }
 
@@ -206,6 +244,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.killCh = make(chan bool)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.resetDb(kv.rf.GetSnapshot())
 
 	go kv.ticker()
 	// You may need initialization code here.
